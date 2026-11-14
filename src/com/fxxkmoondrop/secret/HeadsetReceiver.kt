@@ -83,9 +83,8 @@ class HeadsetReceiver : BroadcastReceiver() {
                 Log.i(TAG, "battery $name ($address) = $level%")
                 // alpha2.27: 同步刷新 GMS 弹窗电量显示
                 try {
-                    val bi = Intent(com.fxxkmoondrop.secret.hook.FastPairHookEntry.ACTION_BATTERY_UPDATE)
+                    val bi = Intent("com.fxxkmoondrop.secret.ACTION_BATTERY_UPDATE")
                     bi.putExtra("sys", level)
-                    bi.setPackage(com.fxxkmoondrop.secret.hook.FastPairHookEntry.PKG_GMS)
                     c.sendBroadcast(bi)
                 } catch (_: Throwable) { }
             }

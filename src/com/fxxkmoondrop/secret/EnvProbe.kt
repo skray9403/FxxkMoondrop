@@ -105,45 +105,16 @@ class EnvProbe private constructor() {
         }
 
         /**
-         * FastPairHook（LSPosed 模块）是否激活：向 GMS 发 PING，收到 PONG 即激活。
-         * 阻塞等待（PING_TIMEOUT_MS），请在子线程调用。
-         *
-         * 缓存策略：正结果永久缓存；负结果 30 秒 TTL（见 NEGATIVE_TTL_MS），过期自动重探 ——
-         * 一次超时不代表模块没启用（GMS 冷启动时 PONG 可能迟到数秒）。
-         * 用户显式「重新检测」走 [retryHookProbe]，无条件清空缓存后重测。
+         * Standalone mode: Hook layer removed, returns false.
          */
         @JvmStatic
-        fun isFastPairHookActive(ctx: Context?): Boolean {
-            // 3.2.10: 正结果永久有效；负结果只在 NEGATIVE_TTL_MS 内有效。
-            // 此前负结果也是永久缓存，而 GMS 冷启动时一次 PING 超时就会被判「未激活」
-            // 并记到进程结束 —— 用户看到的就是永远未激活（issue #10）。
-            sHookActive?.let { cached ->
-                if (cached || !negativeExpired()) return cached
-            }
-            // 3.2.10: 在途锁。此前无互斥，主界面 / 引导页 / 权限页会各自发起一次探测，
-            // 同一进程内就并发连发多个 PING，而 GMS 侧每个已注册的 receiver 各回一次 PONG
-            // （实测一次进入页面 = 2 个 PING / 8 个 PONG）。锁内双检：等锁期间若已有人
-            // 填好结果就直接复用，不再重复广播。pingHook 阻塞最多 PING_TIMEOUT_MS，须子线程调用。
-            synchronized(probeLock) {
-                sHookActive?.let { cached ->
-                    if (cached || !negativeExpired()) return cached
-                }
-                val h = pingHook(ctx)
-                sHookActive = h
-                sHookActiveAt = android.os.SystemClock.elapsedRealtime()
-                return h
-            }
-        }
+        fun isFastPairHookActive(ctx: Context?): Boolean = false
 
-        /** 非阻塞读 hook 激活缓存：null = 还没探测过 / 负结果已过期（调用方按旧行为保守处理）。
-         *  负结果过期后返回 null 而不是 false，UI 会显示「检测中…」并触发重新探测，
-         *  而不是把过期的「未激活」一直挂在界面上。 */
+        /**
+         * Standalone mode: Hook layer removed, returns false.
+         */
         @JvmStatic
-        fun hookActiveCached(): Boolean? {
-            val v = sHookActive ?: return null
-            if (v) return true
-            return if (negativeExpired()) null else false
-        }
+        fun hookActiveCached(): Boolean = false
 
         /**
          * 用户在界面上显式要求「重新检测」：无条件丢弃缓存，下次调用重新 PING。

@@ -1501,12 +1501,11 @@ class GaiaBleClient private constructor(
         val actualRight = if (right >= 0) right else BatteryStore.getGaiaRight(addr)
         try {
             val ctx = context ?: return
-            val i = android.content.Intent(com.fxxkmoondrop.secret.hook.FastPairHookEntry.ACTION_BATTERY_UPDATE)
+            val i = android.content.Intent("com.fxxkmoondrop.secret.ACTION_BATTERY_UPDATE")
             i.putExtra("left", actualLeft)
             i.putExtra("right", actualRight)
-            i.setPackage(com.fxxkmoondrop.secret.hook.FastPairHookEntry.PKG_GMS)
             ctx.sendBroadcast(i)
-            Log.d(GaiaConstants.TAG, "battery broadcast -> GMS: l=" + actualLeft + " r=" + actualRight)
+            Log.d(GaiaConstants.TAG, "battery broadcast: l=" + actualLeft + " r=" + actualRight)
         } catch (_: Throwable) { }
     }
 

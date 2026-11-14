@@ -104,7 +104,6 @@ android {
 
     packaging {
         resources {
-            merges += "META-INF/xposed/*"
             excludes += setOf(
                 "META-INF/DEPENDENCIES",
                 "META-INF/LICENSE*",
@@ -163,15 +162,6 @@ dependencies {
     implementation("org.jetbrains.kotlin:kotlin-stdlib:2.4.10")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 
-    // Xposed API：仅编译期（运行时由 LSPosed 提供）
-    compileOnly("io.github.libxposed:api:102.0.0")
-
-    // DexKit（org.luckypray:dexkit）：运行时解析目标 APK 的 dex，
-    // 用特征（字符串/调用关系/修饰符）反查被混淆的类与方法，
-    // 避免把混淆名硬编码进来。
-    // 文档：https://luckypray.org/DexKit/
-    implementation("org.luckypray:dexkit:2.3.0")
-
     // 单元测试（纯 JVM，验证 GaiaCommands 帧构造）
     // 3.3.2: 「M3 标准」调色板只用它的 HCT（Cam16 + 色调映射），无 Compose 依赖、体积很小。
     // 之前通过 miuix 传递进来，但 implementation 不暴露给本模块编译期，必须显式声明。
@@ -182,9 +172,6 @@ dependencies {
     // 会让它静默返回默认值），必须用真实实现才能验证 release 响应的解析。
     // 仅测试期生效，不进 APK、不增加运行时体积。
     testImplementation("org.json:json:20260719")
-    // 3.0.3: HookGuardTest 需要 XposedInterface.Chain 做桩，测试期才把它放进 classpath
-    // （主代码仍是 compileOnly，运行时由 LSPosed 提供，不进 APK）
-    testImplementation("io.github.libxposed:api:102.0.0")
 
     // ── 3.2.13: HyperOS 观感轨（UiStyle.MIUIX）────────────────────────
     // 许可：Miuix 为 Apache-2.0（不同于 HyperEars 的 AGPL-3.0，可放心引入）。
