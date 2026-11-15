@@ -1,898 +1,502 @@
 package com.fxxkmoondrop.secret
 
-import android.app.Activity
-import android.app.AlertDialog
-import android.bluetooth.BluetoothAdapter
+import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Path
-import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
+import android.graphics.RectF
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.text.InputType
 import android.view.Gravity
 import android.view.View
-import android.widget.EditText
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.card.MaterialCardView
 import com.google.android.material.slider.Slider
+import java.util.Locale
 
 /**
- * 均衡器（正式入口）：经典蓝牙 SPP，0A 05 读 / 0A 06 写，0A 01+0A 02 读预设、0A 03 切档。
- *
- * 不绑定型号：
- *  · 设备只挑已配对的水月雨设备（多台可选），绝不拿别家耳机试协议；
- *  · 段数由回包长度反推（MoondropEq），不写死 5 段；
- *  · 读完做「解码→回编码」自洽校验，不成立整页只读，避免拿不确定的布局写坏别人；
- *  · 写入以「回读逐字节一致」为唯一成功判据（设备对 0A 06 不回 ACK）。
- *
- * 界面按 Material 3（Expressive 取向）重排：sectionTitle + 分组卡、M3 Slider（带数值气泡）、
- * 药丸按钮、圆角 chip 选预设；间距/字号沿用本应用 M3Ui 那套规范值。
+ * Space Travel 2 PEQ page over its 9ECA BLE service.
+ * Reads the actual firmware capability, PEQ config and every active PEQ point.
+ * Draft changes are local only: COMMIT_PEQ action semantics are not documented as
+ * verified for Space Travel 2, so device-side Apply deliberately remains locked.
  */
 class EqEditorActivity : BaseActivity() {
-
     private lateinit var pal: ThemeUtil.Palette
-    private val ui = Handler(Looper.getMainLooper())
-
+    private lateinit var body: LinearLayout
     private lateinit var status: TextView
-    private lateinit var retryBtn: TextView
-    private lateinit var errorBox: LinearLayout
-    private lateinit var loading: LinearLayout
-    private lateinit var content: LinearLayout
-    private lateinit var applyBtn: TextView
-    private lateinit var curveView: EqCurveView
-    private lateinit var paramsBox: LinearLayout
-    private lateinit var presetBox: LinearLayout
-    private lateinit var localBox: LinearLayout
-    private lateinit var undoBtn: TextView
-    /** 最后一次「读成功 / 写成功回读」的曲线快照：撤销就是回到这里 */
-    private var baseline: MoondropEq.Profile? = null
+    private lateinit var graph: PeqGraph
+    private lateinit var rows: LinearLayout
+    private lateinit var pointTitle: TextView
+    private lateinit var gainSlider: Slider
+    private lateinit var gainValue: TextView
+    private lateinit var filterButton: MaterialButton
+    private lateinit var applyButton: MaterialButton
+    private lateinit var reloadButton: MaterialButton
 
-    private val infoV = ArrayList<TextView>()
-    private val gainV = ArrayList<TextView>()
-    private val sliders = ArrayList<Slider>()
+    private var client: BleSourceSwitchClient? = null
+    private var readGeneration = 0
+    private var selected = 0
+    private var config: BleSourceProtocol.SrcPeqConfig? = null
+    private var firmware: BleSourceProtocol.SrcFwInfo? = null
+    private val original = ArrayList<PointDraft>()
+    private val draft = ArrayList<PointDraft>()
+    private var changingSlider = false
 
-    private var profile: MoondropEq.Profile? = null
-    private var editable = false
-    private var gMin = -12f
-    private var gMax = 3f
-
-    private var presetIds: IntArray = intArrayOf(0, 1, 2)
-    private var currentPreset = -1
-    private var presetKnown = false
-
-    @Volatile private var alive = false
-    private var addr: String? = null
+    private data class PointDraft(
+        val index: Int,
+        var frequencyHz: Int,
+        var gainRaw: Int,
+        var qRaw: Int,
+        var filter: Int
+    )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Lang.refresh(this)
         pal = ThemeUtil.Palette(this)
+        val page = M3Ui.largeHeaderPageWithBack(this, pal,
+            Lang.t("参数均衡器", "Parametric EQ"), Runnable { finish() })
+        body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(12), dp(16), dp(28))
+        }
 
-        val sbh = resources.getIdentifier("status_bar_height", "dimen", "android")
-                .let { if (it > 0) resources.getDimensionPixelSize(it) else 0 }
+        status = TextView(this).apply {
+            text = Lang.t("等待 9ECA BLE 服务…", "Waiting for 9ECA BLE service…")
+            textSize = 13f
+            setTextColor(pal.onVariant)
+            setPadding(dp(4), dp(4), dp(4), dp(14))
+        }
+        body.addView(status)
 
-        // 官方大标题页（带返回键版本）：返回键属于标题栏、随栏一起收缩
-        val page = M3Ui.largeHeaderPageWithBack(this, pal, Lang.t("均衡器", "Equalizer")) { finish() }
+        graph = PeqGraph(this, pal)
+        val graphCard = card()
+        graphCard.addView(graph, LinearLayout.LayoutParams(-1, dp(238)))
+        body.addView(graphCard)
 
-        val body = LinearLayout(this)
-        body.orientation = LinearLayout.VERTICAL
+        val pointHeading = TextView(this).apply {
+            text = Lang.t("均衡器参数", "Equalizer controls")
+            textSize = 14f
+            setTextColor(pal.onVariant)
+            typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
+            setPadding(0, dp(18), 0, dp(8))
+        }
+        body.addView(pointHeading)
 
-        // 加载态：整页显示进度圈 + 一行说明（读不到参数时不展示半成品界面）
-        loading = LinearLayout(this)
-        loading.orientation = LinearLayout.VERTICAL
-        loading.gravity = Gravity.CENTER_HORIZONTAL
-        loading.setPadding(0, dp(72), 0, dp(72))
-        // 官方 M3 加载指示器：直径 48dp、轨道 4dp（Material3 规范值）
-        val ind = com.google.android.material.loadingindicator.LoadingIndicator(this)
-        ind.indicatorSize = dp(48)
-        ind.setIndicatorColor(pal.primary)
-        loading.addView(ind)
-        val lt = TextView(this)
-        lt.text = Lang.t("正在读取耳机参数…", "Reading from headset…")
-        lt.textSize = 13f
-        lt.setTextColor(pal.onVariant)
-        lt.gravity = Gravity.CENTER
-        lt.setPadding(0, dp(16), 0, 0)
-        loading.addView(lt)
-        body.addView(loading, LinearLayout.LayoutParams(-1, -2))
+        val editor = card()
+        val editorBody = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(10), dp(16), dp(14))
+        }
+        pointTitle = TextView(this).apply {
+            textSize = 16f
+            setTextColor(pal.onSurface)
+            typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
+            setPadding(0, 0, 0, dp(8))
+        }
+        editorBody.addView(pointTitle)
 
-        // 出错时才用的一行说明（成功不再显示任何“已读取”字样）
-        status = TextView(this)
-        status.textSize = 12f
-        status.setTextColor(pal.onVariant)
-        status.setPadding(dp(12), dp(2), dp(12), dp(8))
-        errorBox = LinearLayout(this)
-        errorBox.orientation = LinearLayout.VERTICAL
-        errorBox.gravity = Gravity.CENTER_HORIZONTAL
-        errorBox.setPadding(dp(24), dp(48), dp(24), dp(24))
-        errorBox.visibility = View.GONE
-        body.addView(errorBox, LinearLayout.LayoutParams(-1, -2))
+        gainValue = TextView(this).apply {
+            textSize = 14f
+            setTextColor(pal.primary)
+        }
+        editorBody.addView(gainValue)
+        gainSlider = Slider(this).apply {
+            valueFrom = -1200f
+            valueTo = 1200f
+            value = 0f
+            setLabelFormatter { v -> String.format(Locale.US, "%d", v.toInt()) }
+            addOnChangeListener { _, value, fromUser ->
+                if (!fromUser || changingSlider || selected !in draft.indices) return@addOnChangeListener
+                draft[selected].gainRaw = value.toInt()
+                renderDraft()
+            }
+        }
+        editorBody.addView(gainSlider, LinearLayout.LayoutParams(-1, -2))
 
-        status = status.apply { gravity = Gravity.CENTER; textAlignment = View.TEXT_ALIGNMENT_CENTER }
-        errorBox.addView(status, LinearLayout.LayoutParams(-1, -2))
-
-        retryBtn = m3Text(Lang.t("重试", "Retry")) { doRead(null) }
-        errorBox.addView(retryBtn, LinearLayout.LayoutParams(-2, dp(40)).also {
-            it.topMargin = dp(8); it.gravity = Gravity.CENTER_HORIZONTAL
+        filterButton = MaterialButton(this, null,
+            com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            text = Lang.t("滤波器", "Filter")
+            setOnClickListener { showFilterPicker() }
+        }
+        editorBody.addView(filterButton, LinearLayout.LayoutParams(-1, dp(48)))
+        val editPoint = MaterialButton(this, null,
+            com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            text = Lang.t("编辑频率与 Q 值", "Edit frequency and Q")
+            setOnClickListener { showPointDialog() }
+        }
+        editorBody.addView(editPoint, LinearLayout.LayoutParams(-1, dp(48)).also {
+            it.topMargin = dp(8)
         })
+        editor.addView(editorBody)
+        body.addView(editor)
 
-        content = LinearLayout(this)
-        content.orientation = LinearLayout.VERTICAL
-        content.visibility = View.GONE
-        body.addView(content, LinearLayout.LayoutParams(-1, -2))
+        val pointsTitle = TextView(this).apply {
+            text = Lang.t("频点列表", "PEQ points")
+            textSize = 14f
+            setTextColor(pal.onVariant)
+            typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
+            setPadding(0, dp(18), 0, dp(8))
+        }
+        body.addView(pointsTitle)
+        rows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val pointsCard = card()
+        pointsCard.addView(rows)
+        body.addView(pointsCard)
 
-        // 频响预览卡
-        curveView = EqCurveView()
-        val curveHolder = LinearLayout(this)
-        curveHolder.setPadding(dp(8), dp(8), dp(8), dp(8))
-        curveHolder.addView(curveView, LinearLayout.LayoutParams(-1, dp(132)))
-        content.addView(M3Ui.groupCard(this, pal, curveHolder), LinearLayout.LayoutParams(-1, -2))
+        val actionsTitle = TextView(this).apply {
+            text = Lang.t("操作", "Actions")
+            textSize = 14f
+            setTextColor(pal.onVariant)
+            typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
+            setPadding(0, dp(18), 0, dp(8))
+        }
+        body.addView(actionsTitle)
+        val actionRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        reloadButton = MaterialButton(this).apply {
+            text = Lang.t("重新读取", "Reload")
+            setOnClickListener { readPeq() }
+        }
+        val resetButton = MaterialButton(this, null,
+            com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            text = Lang.t("重置草稿", "Reset draft")
+            setOnClickListener {
+                draft.clear()
+                draft.addAll(original.map { it.copy() })
+                selected = selected.coerceIn(0, (draft.size - 1).coerceAtLeast(0))
+                renderDraft()
+            }
+        }
+        applyButton = MaterialButton(this).apply {
+            text = Lang.t("应用", "Apply")
+            isEnabled = false
+        }
+        actionRow.addView(reloadButton, LinearLayout.LayoutParams(0, dp(52), 1f).also { it.marginEnd = dp(4) })
+        actionRow.addView(resetButton, LinearLayout.LayoutParams(0, dp(52), 1f).also { it.marginStart = dp(4); it.marginEnd = dp(4) })
+        actionRow.addView(applyButton, LinearLayout.LayoutParams(0, dp(52), 1f).also { it.marginStart = dp(4) })
+        body.addView(actionRow)
 
-        contentOf(content)
-        rebuildLocalPresets()
+        val warning = TextView(this).apply {
+            text = Lang.t(
+                "安全保护：本页会读取耳机 PEQ，并允许本地预览修改。Space Travel 2 的 PEQ 提交动作尚未完成实机验证，因此不会向耳机写入。",
+                "Safety lock: this page reads the earbud PEQ and previews local edits. Space Travel 2 PEQ commit behaviour has not been hardware-verified, so no writes are sent."
+            )
+            textSize = 12f
+            setTextColor(pal.onVariant)
+            setPadding(dp(4), dp(12), dp(4), 0)
+        }
+        body.addView(warning)
 
-        body.setPadding(dp(12), dp(16), dp(12), dp(16))
         page.sv.addView(body, LinearLayout.LayoutParams(-1, -2))
         setContentView(page.container)
         M3Ui.fitSystemBars(this, pal)
-
-        alive = true
-        doRead(null)
     }
 
-    /**
-     * 内容区结构（顺序按设计：参数 → 应用 → 预设 → 操作）。
-     * 尺寸全部走 Material 3 规范值：按钮高 40dp / 圆角 20dp / 14sp，chip 高 32dp / 圆角 8dp / 14sp。
-     */
-    private fun contentOf(body: LinearLayout) {
-        body.addView(M3Ui.sectionTitle(this, pal, Lang.t("参数", "Bands")))
-        paramsBox = LinearLayout(this)
-        paramsBox.orientation = LinearLayout.VERTICAL
-        body.addView(paramsBox, LinearLayout.LayoutParams(-1, -2))
-
-        // 应用：M3 Filled Button（40dp 高、20dp 圆角、14sp），位置在参数卡下方、预设上方
-        val actionRow = LinearLayout(this)
-        actionRow.orientation = LinearLayout.HORIZONTAL
-        actionRow.gravity = Gravity.CENTER
-        applyBtn = m3Filled(Lang.t("应用", "Apply")) { doWrite() }
-        applyBtn.isEnabled = false
-        applyBtn.alpha = 0.38f
-        actionRow.addView(applyBtn, LinearLayout.LayoutParams(-2, -2))
-        // 撤销：只在「有未应用的改动」时可点，回到读进来（或上次写成功回读）的那条曲线
-        undoBtn = m3Text(Lang.t("撤销更改", "Revert")) { revertEdits() }
-        undoBtn.isEnabled = false
-        undoBtn.alpha = 0.38f
-        actionRow.addView(undoBtn, LinearLayout.LayoutParams(-2, -2).also { it.marginStart = dp(8) })
-        body.addView(actionRow, LinearLayout.LayoutParams(-1, -2).also {
-            it.topMargin = dp(12); it.bottomMargin = dp(8)
-        })
-
-        body.addView(M3Ui.sectionTitle(this, pal, Lang.t("预设", "Presets")))
-        val presetScroll = android.widget.HorizontalScrollView(this)
-        presetScroll.isHorizontalScrollBarEnabled = false
-        presetBox = LinearLayout(this)
-        presetBox.orientation = LinearLayout.HORIZONTAL
-        presetBox.setPadding(dp(20), dp(2), dp(20), dp(6))
-        presetScroll.addView(presetBox, LinearLayout.LayoutParams(-2, -2))
-        body.addView(presetScroll, LinearLayout.LayoutParams(-1, -2))
-
-        // 我的预设：App 本地命名库（不占耳机三个槽位），点一下即写入耳机
-        val mineHead = LinearLayout(this)
-        mineHead.orientation = LinearLayout.HORIZONTAL
-        mineHead.gravity = Gravity.CENTER_VERTICAL
-        mineHead.addView(M3Ui.sectionTitle(this, pal, Lang.t("我的预设", "My presets")),
-                LinearLayout.LayoutParams(0, -2, 1f))
-        mineHead.addView(m3Text(Lang.t("保存当前", "Save current")) { savePreset() })
-        body.addView(mineHead, LinearLayout.LayoutParams(-1, -2))
-
-        val localScroll = android.widget.HorizontalScrollView(this)
-        localScroll.isHorizontalScrollBarEnabled = false
-        localBox = LinearLayout(this)
-        localBox.orientation = LinearLayout.HORIZONTAL
-        localBox.setPadding(dp(20), dp(2), dp(20), dp(6))
-        localScroll.addView(localBox, LinearLayout.LayoutParams(-2, -2))
-        body.addView(localScroll, LinearLayout.LayoutParams(-1, -2))
-
-        body.addView(M3Ui.sectionTitle(this, pal, Lang.t("操作", "Actions")))
-        val ops = LinearLayout(this)
-        ops.orientation = LinearLayout.HORIZONTAL
-        ops.gravity = Gravity.CENTER_HORIZONTAL
-        ops.setPadding(dp(12), dp(2), dp(12), dp(6))
-        val opLp = { LinearLayout.LayoutParams(-2, -2) }
-        ops.addView(m3Text(Lang.t("重新读取", "Reload")) { doRead(null) },
-                opLp().also { it.marginEnd = dp(8) })
-        ops.addView(m3Text(Lang.t("自动预增益", "Auto preamp")) {
-            profile?.let { profile = MoondropEq.withAutoPreamp(it); renderAll() }
-        }, opLp().also { it.marginEnd = dp(8) })
-        ops.addView(m3Text(Lang.t("全部归零", "Flatten")) {
-            profile?.let { p ->
-                p.bands.forEach { it.gainDb = 0f }
-                renderAll()
-            }
-        }, opLp())
-        body.addView(ops, LinearLayout.LayoutParams(-1, -2))
-
-        val hint = TextView(this)
-        hint.textSize = 12f
-        hint.setTextColor(pal.onVariant)
-        hint.setPadding(dp(20), dp(10), dp(20), dp(8))
-        hint.text = Lang.t(
-                "读写耳机内的参数均衡（预增益 + 每段频点/增益/Q）。切换预设会覆盖当前调音，应用前先确认。",
-                "Edits the parametric EQ stored in the headset. Switching a preset replaces the current tuning.")
-        body.addView(hint, LinearLayout.LayoutParams(-1, -2))
-    }
-
-    /**
-     * 官方 M3 Expressive 填充按钮：直接用 theme 默认样式（Theme.Material3Expressive →
-     * Widget.Material3Expressive.Button）。**不手写圆角/inset/最小高**——那些值会覆盖
-     * materialSizeOverlay 与 m3expressive_button_shape_state_list，
-     * 按下时就看不到「圆角→方形」的官方形变（概览页刷新按钮就是默认样式，所以它有）。
-     */
-    /**
-     * 主操作按钮：复用 M3Ui.actionButton 的 **Medium 档**（视觉 56dp、16sp、图标 24dp），
-     * 与概览页「刷新状态」、设置页「模拟连接」同一套官方尺寸与按压缩角形变。
-     * 不再手写 textSize/padding，避免又把 materialSizeOverlay 盖掉。
-     */
-    private fun m3Filled(text: String, onClick: () -> Unit): TextView =
-            M3Ui.actionButton(this, text, 0, pal.primary, pal.onPrimary,
-                    View.OnClickListener { onClick() }, medium = true)
-
-    /**
-     * 官方 M3 Text Button：MaterialButton + 透明底 + primary 文字，
-     * 尺寸按规范：高 40dp、圆角 20dp、14sp、横向 12dp 内边距。
-     */
-    /** 官方 M3 Text Button：从 view_m3_text_button.xml 里 inflate（style=Widget.Material3.Button.TextButton） */
-    /** 官方 M3 Expressive 文字按钮：复用 M3Ui.textActionButton（带 ButtonText 主题 overlay，按下有形变） */
-    private fun m3Text(text: String, onClick: () -> Unit): TextView =
-            M3Ui.textActionButton(this, pal, text) { onClick() }
-
-    /** 成功状态不显示任何「已读取/已应用」字样（按设计要求） */
-    private fun clearStatus() {
-        errorBox.visibility = View.GONE
-    }
-
-    /** 出错：只显示一行说明 + 重试，内容区收起（不留空壳） */
-    private fun showError(msg: String) {
-        loading.visibility = View.GONE
-        content.visibility = View.GONE
-        status.text = msg
-        status.setTextColor(pal.red)
-        errorBox.visibility = View.VISIBLE
-    }
-
-    /** 加载态：整页转圈；只有拿到数据才露出内容 */
-    private fun setLoading() {
-        loading.visibility = View.VISIBLE
-        content.visibility = View.GONE
-        errorBox.visibility = View.GONE
-    }
-
-    private fun showContent() {
-        loading.visibility = View.GONE
-        content.visibility = View.VISIBLE
-        clearStatus()
-    }
-
-    private fun setApplyEnabled(on: Boolean) {
-        applyBtn.isEnabled = on
-        applyBtn.alpha = if (on) 1f else 0.38f
-    }
-
-    // ───────────────────────── 参数行（M3 Slider） ─────────────────────────
-
-    private fun rebuildParams(p: MoondropEq.Profile) {
-        infoV.clear(); gainV.clear(); sliders.clear()
-        // 范围跟着数据走：默认 -12..+3 dB（官方文档范围），设备里本来更极端就扩出去，别截断人家参数
-        gMin = Math.min(-12f, Math.floor(p.bands.minOf { it.gainDb }.toDouble()).toFloat())
-        gMax = Math.max(3f, Math.ceil(p.bands.maxOf { it.gainDb }.toDouble()).toFloat())
-
-        val rows = ArrayList<View>()
-        for (i in p.bands.indices) {
-            val row = LinearLayout(this)
-            row.orientation = LinearLayout.VERTICAL
-            row.setPadding(dp(16), dp(10), dp(16), dp(2))
-
-            val top = LinearLayout(this)
-            top.orientation = LinearLayout.HORIZONTAL
-            top.gravity = Gravity.CENTER_VERTICAL
-            val info = TextView(this)
-            info.textSize = 14f
-            info.setTextColor(pal.onSurface)
-            top.addView(info, LinearLayout.LayoutParams(0, -2, 1f))
-            val gain = TextView(this)
-            gain.textSize = 14f
-            gain.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            gain.setTextColor(pal.primary)
-            top.addView(gain, LinearLayout.LayoutParams(-2, -2))
-            row.addView(top, LinearLayout.LayoutParams(-1, -2))
-
-            val sl = Slider(this)
-            sl.valueFrom = gMin
-            sl.valueTo = gMax
-            // 不设 stepSize：M3 的刻度点只在有意义的步长时才该出现，
-            // 0.1 dB 细分会让整条轨道变成一串圆点（真机截图复现过）。精度在回调里四舍五入。
-            sl.value = (Math.round(p.bands[i].gainDb * 10) / 10f).coerceIn(gMin, gMax)
-            sl.setLabelFormatter { v -> String.format("%+.1f dB", v) }
-            // 颜色交给主题（动态取色的 primary/secondary），Slider 的 track/thumb 不公开可写
-            sl.isEnabled = editable
-            sl.addOnChangeListener { _, value, fromUser ->
-                if (!fromUser) return@addOnChangeListener
-                val pf = profile ?: return@addOnChangeListener
-                pf.bands.getOrNull(i) ?: return@addOnChangeListener
-                pf.bands[i].gainDb = Math.round(value * 10) / 10f
-                renderBand(i); paint(); refreshUndo()
-            }
-            row.addView(sl, LinearLayout.LayoutParams(-1, -2))
-            row.setOnClickListener { editBand(i) }
-            info.setOnClickListener { editBand(i) }
-
-            rows.add(row)
-            infoV.add(info); gainV.add(gain); sliders.add(sl)
-            if (i < p.bands.size - 1) rows.add(divider())
-        }
-        val foot = TextView(this)
-        foot.textSize = 12f
-        foot.setTextColor(pal.onVariant)
-        foot.setPadding(dp(16), dp(6), dp(16), dp(12))
-        rows.add(foot)
-
-        paramsBox.removeAllViews()
-        paramsBox.addView(M3Ui.groupCard(this, pal, *rows.toTypedArray()), LinearLayout.LayoutParams(-1, -2))
-        renderAll()
-    }
-
-    private fun divider(): View = View(this).apply {
-        setBackgroundColor(pal.divider)
-        layoutParams = LinearLayout.LayoutParams(-1, Math.max(1, dp(1)))
-    }
-
-    private fun renderBand(i: Int) {
-        val b = profile?.bands?.getOrNull(i) ?: return
-        infoV.getOrNull(i)?.text = Lang.t("频点 ", "Freq ") + b.freq + " Hz   Q " + String.format("%.2f", b.q)
-        gainV.getOrNull(i)?.text = String.format("%+.1f dB", b.gainDb)
-        val sl = sliders.getOrNull(i) ?: return
-        val want = (Math.round(b.gainDb * 10) / 10f).coerceIn(gMin, gMax)
-        if (Math.abs(sl.value - want) > 0.05f) sl.value = want
-    }
-
-    private fun renderAll() {
-        val p = profile ?: return
-        for (i in p.bands.indices) renderBand(i)
-        paint()
-        // 卡片脚注：预增益 + 段数（设备自己告诉我们的段数）
-        paramsBox.getChildAt(0)?.let { card ->
-            val box = (card as? android.view.ViewGroup)?.getChildAt(0) as? android.view.ViewGroup
-            val foot = box?.getChildAt(box.childCount - 1) as? TextView
-            foot?.text = Lang.t("预增益 ", "Preamp ") + String.format("%+.1f dB", p.preampDb) +
-                    Lang.t("（防叠加削波）", " (anti-clipping)") +
-                    Lang.t("　共 ", "　") + p.bands.size + Lang.t(" 段", " bands")
-        }
-        refreshUndo()
-    }
-
-    private fun paint() { profile?.let { curveView.setProfile(it) } }
-
-    /**
-     * 二级弹窗：编辑单段的频点 / Q。
-     * 用官方 M3 组件——MaterialAlertDialogBuilder（M3 圆角容器 + 文字按钮）
-     * + TextInputLayout（OutlinedBox，带单位后缀），不要再退回系统 AlertDialog。
-     */
-    private fun editBand(i: Int) {
-        val b = profile?.bands?.getOrNull(i) ?: return
-        if (!editable) {
-            showError(Lang.t("这台设备的载荷未通过自洽校验，只能查看", "Read-only: layout not verified"))
-            return
-        }
-        val box = LinearLayout(this)
-        box.orientation = LinearLayout.VERTICAL
-        box.setPadding(dp(24), dp(8), dp(24), dp(0))
-
-        val tilF = com.google.android.material.textfield.TextInputLayout(this, null,
-                com.google.android.material.R.attr.textInputOutlinedStyle)
-        tilF.hint = Lang.t("频点", "Frequency")
-        tilF.suffixText = "Hz"
-        val etF = com.google.android.material.textfield.TextInputEditText(tilF.context)
-        etF.inputType = InputType.TYPE_CLASS_NUMBER
-        etF.setText(b.freq.toString())
-        tilF.addView(etF)
-        box.addView(tilF, LinearLayout.LayoutParams(-1, -2))
-
-        val tilQ = com.google.android.material.textfield.TextInputLayout(this, null,
-                com.google.android.material.R.attr.textInputOutlinedStyle)
-        tilQ.hint = "Q"
-        val etQ = com.google.android.material.textfield.TextInputEditText(tilQ.context)
-        etQ.inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
-        etQ.setText(String.format("%.2f", b.q))
-        tilQ.addView(etQ)
-        box.addView(tilQ, LinearLayout.LayoutParams(-1, -2).also { it.topMargin = dp(8) })
-
-        com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
-                .setTitle(Lang.t("第 ", "Band ") + (i + 1) + Lang.t(" 段", ""))
-                .setView(box)
-                .setNegativeButton(Lang.t("取消", "Cancel"), null)
-                .setPositiveButton(Lang.t("确定", "OK")) { _, _ ->
-                    tilF.error = null
-                    tilQ.error = null
-                    val nf = etF.text.toString().trim().toIntOrNull()
-                    val nq = etQ.text.toString().trim().toFloatOrNull()
-                    if (nf == null || nf !in 20..20000) {
-                        tilF.error = Lang.t("请输入 20–20000", "20–20000")
-                    } else b.freq = nf
-                    if (nq == null || nq !in 0.1f..12f) {
-                        tilQ.error = Lang.t("请输入 0.1–12", "0.1–12")
-                    } else b.q = nq
-                    renderBand(i); paint(); refreshUndo()
-                }
-                .show()
-    }
-
-    // ───────────────────────── 预设（0A 01 / 0A 02 / 0A 03） ─────────────────────────
-
-    private fun rebuildPresets() {
-        presetBox.removeAllViews()
-        if (!presetKnown) {
-            // 设备没回预设表：只提示，不编名字
-            val t = TextView(this)
-            t.text = Lang.t("读取不到预设列表", "Preset list unavailable")
-            t.textSize = 12f
-            t.setTextColor(pal.onVariant)
-            t.setPadding(dp(12), dp(8), dp(12), dp(8))
-            presetBox.addView(t)
-            return
-        }
-        for (id in presetIds) {
-            val chip = pill(presetLabel(id), id == currentPreset) { setPreset(id) }
-            presetBox.addView(chip, LinearLayout.LayoutParams(-2, -2).also { it.marginEnd = dp(8) })
-        }
-    }
-
-    /** 设备只回下标不回名字：0/1/2 是我们实测过的三档，其余只标编号，避免给错名字 */
-    private fun presetLabel(id: Int): String = when (id) {
-        0 -> Lang.t("流行", "Pop")
-        1 -> Lang.t("标准", "Standard")
-        2 -> Lang.t("监听", "Monitor")
-        else -> Lang.t("预设 ", "Preset ") + (id + 1)
-    }
-
-    /** 布局不认识时的占位（只读提示） */
-    private fun showPlaceholder() {
-        paramsBox.removeAllViews()
-        val t = TextView(this)
-        t.text = Lang.t("这台设备的载荷布局与已知格式不同", "Payload layout doesn't match the known format")
-        t.textSize = 13f
-        t.setTextColor(pal.onVariant)
-        t.setPadding(dp(20), dp(16), dp(20), dp(16))
-        paramsBox.addView(M3Ui.groupCard(this, pal, t), LinearLayout.LayoutParams(-1, -2))
-    }
-
-    /**
-     * 官方 M3 Filter Chip：Material Chip + 规范尺寸（高 32dp、圆角 8dp、14sp、横向 16dp），
-     * 未选中 1dp 描边、选中 secondaryContainer。
-     */
-    private fun pill(text: String, selected: Boolean, onClick: () -> Unit): TextView {
-        val c = com.google.android.material.chip.Chip(this)
-        c.text = text
-        c.textSize = 14f
-        c.isCheckable = true
-        c.isChecked = selected
-        c.isChipIconVisible = false
-        c.isCheckedIconVisible = false
-        c.chipMinHeight = dp(32).toFloat()
-        c.setPadding(dp(16), dp(8), dp(16), dp(8))
-        c.shapeAppearanceModel = c.shapeAppearanceModel.toBuilder()
-                .setAllCornerSizes(dp(8).toFloat()).build()
-        c.chipStrokeWidth = dp(1).toFloat()
-        c.chipStrokeColor = cs(intArrayOf() to pal.outline)
-        c.chipBackgroundColor = cs(
-                intArrayOf(android.R.attr.state_checked) to pal.container,
-                intArrayOf() to android.graphics.Color.TRANSPARENT)
-        c.setTextColor(cs(
-                intArrayOf(android.R.attr.state_checked) to pal.onContainer,
-                intArrayOf() to pal.onSurface))
-        c.setOnClickListener { onClick() }
-        return c
-    }
-
-    private fun cs(vararg pairs: Pair<IntArray, Int>): android.content.res.ColorStateList {
-        val states = arrayOfNulls<IntArray>(pairs.size)
-        val colors = IntArray(pairs.size)
-        pairs.forEachIndexed { i, p -> states[i] = p.first; colors[i] = p.second }
-        @Suppress("UNCHECKED_CAST")
-        return android.content.res.ColorStateList(states as Array<IntArray>, colors)
-    }
-
-    // ───────────────────────── 设备与协议 ─────────────────────────
-
-    private fun bondedMoondrop(): List<android.bluetooth.BluetoothDevice> {
-        val bonded = try {
-            BluetoothAdapter.getDefaultAdapter()?.bondedDevices?.toList().orEmpty()
-        } catch (_: Throwable) { emptyList() }
-        return bonded.filter { DeviceMatcher.isMoondrop(try { it.name } catch (_: Throwable) { null }) }
-    }
-
-    private fun resolveDevice(onReady: (String?) -> Unit) {
-        addr?.let { onReady(it); return }
-        val md = bondedMoondrop()
-        if (md.isEmpty()) { onReady(null); return }
-        if (md.size == 1) {
-            addr = try { md[0].address } catch (_: Throwable) { null }
-            onReady(addr); return
-        }
-        val names = md.map { (try { it.name } catch (_: Throwable) { null } ?: "?") }.toTypedArray()
-        AlertDialog.Builder(this)
-                .setTitle(Lang.t("选择水月雨设备", "Choose a Moondrop device"))
-                .setItems(names) { _, which ->
-                    addr = try { md[which].address } catch (_: Throwable) { null }
-                    doRead(null)
-                }
-                .setNegativeButton(Lang.t("取消", "Cancel"), null)
-                .show()
-    }
-
-    private fun doRead(afterWrite: ByteArray?) {
-        // 关键：doWrite / setPreset 在后台线程完成后会回调这里，而 setLoading() 会动 View。
-        // 不在主线程就先抛回主线程，避免 CalledFromWrongThreadException（真机崩溃堆栈见 260 行）。
-        if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) {
-            ui.post { if (alive) doRead(afterWrite) }
-            return
-        }
-        setLoading()
-        resolveDevice { target ->
-            if (target == null) {
-                showError(Lang.t("没有已配对的水月雨设备", "No bonded Moondrop device")); return@resolveDevice
-            }
-            Thread {
-                if (!MoondropSpp.isConnected() && !MoondropSpp.connect(target)) {
-                    ui.post { if (alive) showError(Lang.t("SPP 连接失败（耳机被官方 App 占用或已休眠？）", "SPP connect failed")) }
-                    return@Thread
-                }
-                // 预设表/当前档位：和曲线同一次连接里一并读，读完一起断开
-                val ids = MoondropSpp.readPresetIds()
-                val cur = MoondropSpp.readCurrentPreset()
-                val raw = MoondropSpp.readCurve()
-                if (raw == null) {
-                    ui.post {
-                        if (!alive) return@post
-                        showError(Lang.t("读不到曲线：这台设备可能不支持该协议", "No curve reply — protocol not supported"))
-                    }
-                    return@Thread
-                }
-                if (afterWrite != null && !afterWrite.contentEquals(raw)) {
-                    ui.post { if (alive) showError(Lang.t("写入后回读不一致（设备没接受这组参数）", "Read-back mismatch")) }
-                    return@Thread
-                }
-                val pr = MoondropEq.decode(raw)
-                val ok = pr != null && MoondropEq.roundTrips(raw)
-                ui.post {
-                    if (!alive) return@post
-                    presetKnown = ids != null
-                    if (ids != null) presetIds = ids
-                    currentPreset = cur
-                    rebuildPresets()
-                    if (pr == null) {
-                        showError(Lang.t("载荷布局不认识（", "Unrecognised payload (") + raw.size +
-                                Lang.t(" 字节）", " bytes)"))
-                        editable = false; setApplyEnabled(false)
-                        showContent()
-                        showPlaceholder()
-                    } else {
-                        profile = pr
-                        // 读到的（或写入后回读到的）曲线 = 「未改动」基准，撤销回到这里
-                        baseline = pr.duplicate()
-                        editable = ok
-                        rebuildParams(pr)
-                        showContent()
-                        setApplyEnabled(ok)
-                        if (!ok) showError(Lang.t("这台设备的载荷没能自洽还原，只能查看",
-                                "Layout not self-consistent — read only"))
-                    }
-                }
-            }.start()
-        }
-    }
-
-    @Volatile private var busy = false
-
-    private fun doWrite() {
-        val p = profile ?: return
-        if (!editable) { showError(Lang.t("当前为只读模式", "Read-only mode")); return }
-        if (busy) return
-        val target = addr
-        if (target == null) { showError(Lang.t("没有已配对的水月雨设备", "No bonded Moondrop device")); return }
-        // 写之前按官方文档范围钳制（频点 20–20000 Hz、增益 −12…+3 dB、Q 0.1…12、预增益 −24…0）。
-        // 越界系数会让耳机 DSP 自己重启 —— 这是「写完之后耳机反复重连」最合理的软件诱因。
-        val safe = p.duplicate()
-        safe.preampDb = safe.preampDb.coerceIn(-24f, 0f)
-        safe.bands.forEach { b ->
-            b.freq = b.freq.coerceIn(20, 20000)
-            b.gainDb = b.gainDb.coerceIn(-12f, 3f)
-            b.q = b.q.coerceIn(0.1f, 12f)
-        }
-        val raw = MoondropEq.encode(safe)
-        busy = true
-        // 注意：这里不立刻 setEnabled(false)——那会吞掉 MaterialButton 的点击波纹与状态动画；
-        // 用 busy 标记防重入，写完再决定按钮状态。
-        Thread {
-            // 读完就会断开（不长期占链路），写之前自己把链路建起来
-            if (!MoondropSpp.isConnected() && !MoondropSpp.connect(target)) {
-                ui.post { busy = false; if (alive) { setApplyEnabled(editable); showError(Lang.t("写入前建链失败", "Connect failed")) } }
-                return@Thread
-            }
-            val ok = MoondropSpp.writeCurve(raw)
-            ui.post {
-                busy = false
-                if (!alive) return@post
-                setApplyEnabled(editable)
-                if (!ok) showError(Lang.t("写入失败（链路断开？）", "Write failed"))
-            }
-            if (ok) { Thread.sleep(500); doRead(raw) }
-        }.start()
-    }
-
-    private fun setPreset(idx: Int) {
-        val target = addr ?: run {
-            showError(Lang.t("没有已配对的水月雨设备", "No bonded Moondrop device")); return
-        }
-        Thread {
-            if (!MoondropSpp.isConnected() && !MoondropSpp.connect(target)) {
-                ui.post { if (alive) showError(Lang.t("切换预设前建链失败", "Connect failed")) }
-                return@Thread
-            }
-            val r = MoondropSpp.setPreset(idx)
-            ui.post {
-                if (!alive) return@post
-                if (r == null) showError(Lang.t("切换预设失败", "Preset switch failed"))
-                else { currentPreset = idx; rebuildPresets() }
-            }
-            if (r != null) { Thread.sleep(300); doRead(null) }
-        }.start()
-    }
-
-    // ───────────────────────── 本地预设（不占耳机槽位） ─────────────────────────
-
-    private fun rebuildLocalPresets() {
-        if (!::localBox.isInitialized) return
-        localBox.removeAllViews()
-        val items = try { EqPresetStore.list(this) } catch (_: Throwable) { emptyList() }
-        if (items.isEmpty()) {
-            val t = TextView(this)
-            t.text = Lang.t("还没有本地预设，调好曲线后点「保存当前」",
-                    "No local presets yet — tune the curve, then tap Save current")
-            t.textSize = 12f
-            t.setTextColor(pal.onVariant)
-            t.setPadding(dp(12), dp(8), dp(12), dp(8))
-            localBox.addView(t)
-            return
-        }
-        for (p in items) {
-            val chip = pill(p.name, false) { applyLocalPreset(p) }
-            chip.setOnLongClickListener { presetMenu(p); true }
-            localBox.addView(chip, LinearLayout.LayoutParams(-2, -2).also { it.marginEnd = dp(8) })
-        }
-    }
-
-    /** 一键应用：载入曲线后直接写进耳机（等同点「应用」）。 */
-    private fun applyLocalPreset(p: EqPresetStore.Preset) {
-        if (!editable) {
-            showError(Lang.t("这台设备的载荷未通过自洽校验，只能查看", "Read-only: layout not verified"))
-            return
-        }
-        val pr = EqPresetStore.toProfile(p)
-        profile = pr
-        rebuildParams(pr)
-        doWrite()
-    }
-
-    /** 预设菜单：走 M3Ui 自绘弹窗（28dp 圆角 + 24dp 内边距 + 56dp 列表行），不用系统 setItems。 */
-    private fun presetMenu(p: EqPresetStore.Preset) {
-        val (dlg, body) = M3Ui.materialDialog(this, pal.primary, pal.card)
-        body.addView(M3Ui.dialogTitle(this, p.name, pal.onSurface), LinearLayout.LayoutParams(-1, -2))
-        body.addView(menuRow(Lang.t("重命名", "Rename"), pal.onSurface) {
-            dlg.dismiss(); renamePreset(p)
-        }, LinearLayout.LayoutParams(-1, dp(56)).also { it.topMargin = dp(8) })
-        body.addView(menuRow(Lang.t("删除", "Delete"), pal.red) {
-            dlg.dismiss(); confirmDeletePreset(p)
-        }, LinearLayout.LayoutParams(-1, dp(56)))
-        val actions = LinearLayout(this)
-        actions.orientation = LinearLayout.HORIZONTAL
-        actions.gravity = Gravity.END or Gravity.CENTER_VERTICAL
-        actions.addView(M3Ui.textButton(this, pal, Lang.t("取消", "Cancel")) { dlg.dismiss() })
-        body.addView(actions, LinearLayout.LayoutParams(-1, -2).also { it.topMargin = dp(8) })
-        dlg.show()
-    }
-
-    /** M3 弹窗菜单行：56dp 高、bodyLarge 16sp、整行可点（ripple 用系统 selectableItemBackground）。 */
-    private fun menuRow(text: String, color: Int, onClick: () -> Unit): TextView {
-        val t = TextView(this)
-        t.text = text
-        t.textSize = 16f
-        t.setTextColor(color)
-        t.gravity = Gravity.CENTER_VERTICAL
-        // 不额外缩进：M3 对话框里列表项文字必须与标题同一条左基线（body 已有 24dp 内边距）
-        t.setPadding(0, 0, 0, 0)
-        val tv = android.util.TypedValue()
-        if (theme.resolveAttribute(android.R.attr.selectableItemBackground, tv, true)) {
-            t.setBackgroundResource(tv.resourceId)
-        }
-        t.setOnClickListener { onClick() }
-        t.isClickable = true
-        return t
-    }
-
-    private fun savePreset() {
-        val pr = profile ?: return
-        if (!editable) {
-            showError(Lang.t("这台设备的载荷未通过自洽校验，只能查看", "Read-only: layout not verified"))
-            return
-        }
-        val cur = try { EqPresetStore.list(this) } catch (_: Throwable) { emptyList() }
-        if (cur.size >= EqPresetStore.MAX_COUNT) {
-            showError(Lang.t("本地预设已满（", "Preset limit reached (") + EqPresetStore.MAX_COUNT + Lang.t(" 个）", ")"))
-            return
-        }
-        val suggest = EqPresetStore.uniqueName(
-                Lang.t("我的预设", "My preset") + " " + (cur.size + 1), cur.map { it.name })
-        showNameDialog(Lang.t("保存为预设", "Save as preset"), suggest) { name ->
-            if (EqPresetStore.save(this, name, pr) == null) {
-                showError(Lang.t("保存失败：预设已满", "Save failed: preset limit"))
-            } else {
-                rebuildLocalPresets()
-            }
-        }
-    }
-
-    private fun renamePreset(p: EqPresetStore.Preset) {
-        showNameDialog(Lang.t("重命名预设", "Rename preset"), p.name) { name ->
-            EqPresetStore.rename(this, p.id, name)
-            rebuildLocalPresets()
-        }
-    }
-
-    private fun confirmDeletePreset(p: EqPresetStore.Preset) {
-        val (dlg, body) = M3Ui.materialDialog(this, pal.primary, pal.card)
-        body.addView(M3Ui.dialogTitle(this, Lang.t("删除预设", "Delete preset"), pal.onSurface),
-                LinearLayout.LayoutParams(-1, -2))
-        val msg = TextView(this)
-        msg.text = Lang.t("「", "「") + p.name + Lang.t(
-                "」会从本机删除，耳机里的曲线不受影响。",
-                "」will be removed from this device. The curve on the headset is unchanged.")
-        msg.textSize = 14f
-        msg.setTextColor(pal.onVariant)
-        msg.setLineSpacing(dp(2).toFloat(), 1.25f)
-        msg.setPadding(0, dp(12), 0, 0)
-        body.addView(msg, LinearLayout.LayoutParams(-1, -2))
-        val actions = LinearLayout(this)
-        actions.orientation = LinearLayout.HORIZONTAL
-        actions.gravity = Gravity.END or Gravity.CENTER_VERTICAL
-        actions.addView(M3Ui.textButton(this, pal, Lang.t("取消", "Cancel")) { dlg.dismiss() })
-        actions.addView(M3Ui.textButton(this, pal, Lang.t("删除", "Delete")) {
-            dlg.dismiss()
-            EqPresetStore.delete(this, p.id)
-            rebuildLocalPresets()
-        })
-        body.addView(actions, LinearLayout.LayoutParams(-1, -2).also { it.topMargin = dp(8) })
-        dlg.show()
-    }
-
-    /** 命名对话框：OutlinedBox + 单行输入，空名字直接不保存。 */
-    /** 命名对话框：与预设菜单同一套 M3Ui 弹窗（标题 22sp、OutlinedBox 输入、右下文字按钮）。 */
-    private fun showNameDialog(title: String, initial: String, onOk: (String) -> Unit) {
-        val (dlg, body) = M3Ui.materialDialog(this, pal.primary, pal.card)
-        body.addView(M3Ui.dialogTitle(this, title, pal.onSurface), LinearLayout.LayoutParams(-1, -2))
-        val til = com.google.android.material.textfield.TextInputLayout(this, null,
-                com.google.android.material.R.attr.textInputOutlinedStyle)
-        til.hint = Lang.t("预设名字", "Preset name")
-        val et = com.google.android.material.textfield.TextInputEditText(til.context)
-        et.inputType = InputType.TYPE_CLASS_TEXT
-        et.setText(initial)
-        et.setSelection(et.text?.length ?: 0)
-        til.addView(et)
-        body.addView(til, LinearLayout.LayoutParams(-1, -2).also { it.topMargin = dp(16) })
-        val actions = LinearLayout(this)
-        actions.orientation = LinearLayout.HORIZONTAL
-        actions.gravity = Gravity.END or Gravity.CENTER_VERTICAL
-        actions.addView(M3Ui.textButton(this, pal, Lang.t("取消", "Cancel")) { dlg.dismiss() })
-        actions.addView(M3Ui.textButton(this, pal, Lang.t("保存", "Save")) {
-            val name = et.text?.toString()?.trim().orEmpty()
-            if (name.isBlank()) {
-                til.error = Lang.t("名字不能为空", "Name required")
-            } else {
-                dlg.dismiss()
-                onOk(name)
-            }
-        })
-        body.addView(actions, LinearLayout.LayoutParams(-1, -2).also { it.topMargin = dp(8) })
-        dlg.show()
-    }
-
-    // ───────────────────────── 撤销未应用的改动 ─────────────────────────
-
-    private fun revertEdits() {
-        val base = baseline?.duplicate() ?: return
-        profile = base
-        rebuildParams(base)
-    }
-
-    private fun sameAsBaseline(): Boolean {
-        val a = profile ?: return false
-        val b = baseline ?: return false
-        if (a.bands.size != b.bands.size) return false
-        if (Math.abs(a.preampDb - b.preampDb) > 0.05f) return false
-        for (i in a.bands.indices) {
-            if (a.bands[i].freq != b.bands[i].freq) return false
-            if (Math.abs(a.bands[i].gainDb - b.bands[i].gainDb) > 0.05f) return false
-            if (Math.abs(a.bands[i].q - b.bands[i].q) > 0.005f) return false
-        }
-        return true
-    }
-
-    private fun refreshUndo() {
-        if (!::undoBtn.isInitialized) return
-        val can = editable && baseline != null && !sameAsBaseline()
-        undoBtn.isEnabled = can
-        undoBtn.alpha = if (can) 1f else 0.38f
-    }
-
-    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
-
-    /** 页面可见期间保持 SPP（避免每次读写都重开 RFCOMM 导致耳机反复重连），离开就断开 */
-    override fun onStop() {
-        MoondropSpp.disconnect()
-        super.onStop()
+    override fun onResume() {
+        super.onResume()
+        GaiaBleClient.getInstance().retainConnection(this)
+        readPeq()
     }
 
     override fun onDestroy() {
-        alive = false
-        MoondropSpp.disconnect()
+        readGeneration++
+        GaiaBleClient.getInstance().releaseConnection(this)
         super.onDestroy()
     }
 
-    /** 频响预览：对数频率轴 + 自动纵向缩放 */
-    private inner class EqCurveView : View(this@EqEditorActivity) {
-        private val curve = Path()
-        private val grid = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = pal.outline; style = Paint.Style.STROKE; strokeWidth = dp(1).toFloat(); alpha = 60
+    private fun readPeq() {
+        val generation = ++readGeneration
+        val gaia = GaiaBleClient.getInstance()
+        client = gaia.getSrcClient()
+        val src = client
+        if (!gaia.isGaiaReady() || !gaia.hasSrcService() || src == null) {
+            showStatus(Lang.t(
+                "9ECA 尚未就绪。请先返回设备页连接 Space Travel 2。",
+                "9ECA is not ready. Return to the device page and connect Space Travel 2."
+            ), true)
+            reloadButton.isEnabled = true
+            return
         }
-        private val line = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = pal.primary; style = Paint.Style.STROKE; strokeWidth = dp(2).toFloat()
-        }
-        private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = pal.primary; style = Paint.Style.FILL; alpha = 30
-        }
-        private var prof: MoondropEq.Profile? = null
+        reloadButton.isEnabled = false
+        draft.clear()
+        original.clear()
+        graph.setPoints(emptyList())
+        showStatus(Lang.t("正在读取固件能力…", "Reading firmware capabilities…"))
+        src.readProtocolFirmwareInfo(object : BleSourceSwitchClient.SrcCallback<BleSourceProtocol.SrcFwInfo> {
+            override fun onSuccess(value: BleSourceProtocol.SrcFwInfo) {
+                if (generation != readGeneration) return
+                firmware = value
+                if (!value.supportsPeq32()) {
+                    reloadButton.isEnabled = true
+                    showStatus(Lang.t(
+                        "当前固件未声明 PEQ32 支持，已停止读取。",
+                        "This firmware does not advertise PEQ32 support. Reading was stopped."
+                    ), true)
+                    return
+                }
+                readConfig(generation, src)
+            }
+            override fun onError(message: String) {
+                if (generation != readGeneration) return
+                reloadButton.isEnabled = true
+                showStatus(message, true)
+            }
+        })
+    }
 
-        fun setProfile(p: MoondropEq.Profile) { prof = p; invalidate() }
+    private fun readConfig(generation: Int, src: BleSourceSwitchClient) {
+        src.getPeqConfig(object : BleSourceSwitchClient.SrcCallback<BleSourceProtocol.SrcPeqConfig> {
+            override fun onSuccess(value: BleSourceProtocol.SrcPeqConfig) {
+                if (generation != readGeneration) return
+                config = value
+                if (value.pointCount !in 1..BleSourceProtocol.PEQ_POINT_COUNT) {
+                    reloadButton.isEnabled = true
+                    showStatus(Lang.t("耳机没有返回可用的 PEQ 点。", "The earbud returned no usable PEQ points."), true)
+                    return
+                }
+                readPoint(generation, src, 0, value.pointCount)
+            }
+            override fun onError(message: String) {
+                if (generation != readGeneration) return
+                reloadButton.isEnabled = true
+                showStatus(message, true)
+            }
+        })
+    }
+
+    private fun readPoint(generation: Int, src: BleSourceSwitchClient, index: Int, count: Int) {
+        if (generation != readGeneration) return
+        if (index >= count) {
+            reloadButton.isEnabled = true
+            original.clear()
+            original.addAll(draft.map { it.copy() })
+            selected = 0
+            renderDraft()
+            val cfg = config
+            val fw = firmware
+            val preamp = cfg?.preGainRaw?.div(100f) ?: 0f
+            showStatus(
+                Lang.t(
+                    "已读取 " + draft.size + " 个点 · 预增益 " + String.format(Locale.US, "%+.2f dB", preamp) +
+                        " · FW " + (fw?.major ?: 0) + "." + (fw?.minor ?: 0) + "." + (fw?.patch ?: 0),
+                    "Read " + draft.size + " points · preamp " + String.format(Locale.US, "%+.2f dB", preamp) +
+                        " · FW " + (fw?.major ?: 0) + "." + (fw?.minor ?: 0) + "." + (fw?.patch ?: 0)
+                )
+            )
+            return
+        }
+        src.getPeqPoint(index, object : BleSourceSwitchClient.SrcCallback<BleSourceProtocol.SrcPeqPoint> {
+            override fun onSuccess(value: BleSourceProtocol.SrcPeqPoint) {
+                if (generation != readGeneration) return
+                draft.add(PointDraft(value.pointIndex, value.frequencyHz, value.gainRaw, value.qRaw, value.filter))
+                readPoint(generation, src, index + 1, count)
+            }
+            override fun onError(message: String) {
+                if (generation != readGeneration) return
+                reloadButton.isEnabled = true
+                showStatus(Lang.t("已读取 " + draft.size + "/" + count + " 个点：" + message,
+                    "Read " + draft.size + "/" + count + " points: " + message), true)
+                renderDraft()
+            }
+        })
+    }
+
+    private fun renderDraft() {
+        graph.setPoints(draft)
+        rowsSafeRender()
+        if (draft.isEmpty()) {
+            pointTitle.text = Lang.t("尚无数据", "No data")
+            gainValue.text = ""
+            filterButton.isEnabled = false
+            gainSlider.isEnabled = false
+            return
+        }
+        selected = selected.coerceIn(0, draft.lastIndex)
+        val p = draft[selected]
+        pointTitle.text = Lang.t("第 " + (selected + 1) + " 段 · " + p.frequencyHz + " Hz",
+            "Band " + (selected + 1) + " · " + p.frequencyHz + " Hz")
+        gainValue.text = Lang.t("增益原始值：", "Gain raw: ") + p.gainRaw
+        changingSlider = true
+        gainSlider.value = p.gainRaw.toFloat().coerceIn(gainSlider.valueFrom, gainSlider.valueTo)
+        changingSlider = false
+        filterButton.text = filterName(p.filter)
+        filterButton.isEnabled = true
+        gainSlider.isEnabled = true
+    }
+
+    private fun rowsSafeRender() {
+        rows.removeAllViews()
+        draft.sortedBy { it.frequencyHz }.forEach { point ->
+            val item = MaterialButton(this, null,
+                com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+                text = (point.index + 1).toString() + "   " + point.frequencyHz + " Hz"
+                isCheckable = false
+                textAlignment = View.TEXT_ALIGNMENT_TEXT_START
+                setOnClickListener {
+                    selected = point.index.coerceIn(0, (draft.size - 1).coerceAtLeast(0))
+                    renderDraft()
+                }
+            }
+            rows.addView(item, LinearLayout.LayoutParams(-1, dp(44)))
+        }
+    }
+
+    private fun showFilterPicker() {
+        val filters = arrayOf("Peaking", "Low shelf", "High shelf", "Low pass",
+            "High pass", "Band pass", "Notch", "All pass")
+        com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+            .setTitle(Lang.t("滤波器类型", "Filter type"))
+            .setSingleChoiceItems(filters, draft.getOrNull(selected)?.filter ?: 0) { dialog, which ->
+                draft.getOrNull(selected)?.filter = which
+                dialog.dismiss()
+                renderDraft()
+            }.setNegativeButton(Lang.t("取消", "Cancel"), null)
+            .show()
+    }
+
+    private fun showPointDialog() {
+        val point = draft.getOrNull(selected) ?: return
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(8), dp(24), 0)
+        }
+        val freq = com.google.android.material.textfield.TextInputLayout(this, null,
+            com.google.android.material.R.attr.textInputOutlinedStyle).apply {
+            hint = Lang.t("频率", "Frequency")
+            suffixText = "Hz"
+        }
+        val freqInput = com.google.android.material.textfield.TextInputEditText(freq.context).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setText(point.frequencyHz.toString())
+        }
+        freq.addView(freqInput)
+        box.addView(freq)
+        val q = com.google.android.material.textfield.TextInputLayout(this, null,
+            com.google.android.material.R.attr.textInputOutlinedStyle).apply {
+            hint = Lang.t("Q 原始值", "Q raw")
+        }
+        val qInput = com.google.android.material.textfield.TextInputEditText(q.context).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setText(point.qRaw.toString())
+        }
+        q.addView(qInput)
+        box.addView(q, LinearLayout.LayoutParams(-1, -2).also { it.topMargin = dp(8) })
+        com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+            .setTitle(Lang.t("编辑第 " + (selected + 1) + " 段", "Edit band " + (selected + 1)))
+            .setView(box)
+            .setNegativeButton(Lang.t("取消", "Cancel"), null)
+            .setPositiveButton(Lang.t("预览", "Preview")) { _, _ ->
+                val newFrequency = freqInput.text?.toString()?.toIntOrNull()
+                val newQ = qInput.text?.toString()?.toIntOrNull()
+                if (newFrequency == null || newFrequency !in 20..20000 || newQ == null || newQ !in 1..65535) {
+                    showStatus(Lang.t("频率或 Q 原始值超出范围。", "Frequency or Q raw value is out of range."), true)
+                } else {
+                    point.frequencyHz = newFrequency
+                    point.qRaw = newQ
+                    renderDraft()
+                }
+            }.show()
+    }
+
+    private fun filterName(id: Int): String = when (id) {
+        BleSourceProtocol.FILTER_PEAKING -> "Peaking"
+        BleSourceProtocol.FILTER_LOW_SHELF -> "Low shelf"
+        BleSourceProtocol.FILTER_HIGH_SHELF -> "High shelf"
+        BleSourceProtocol.FILTER_LOW_PASS -> "Low pass"
+        BleSourceProtocol.FILTER_HIGH_PASS -> "High pass"
+        BleSourceProtocol.FILTER_BAND_PASS -> "Band pass"
+        BleSourceProtocol.FILTER_NOTCH -> "Notch"
+        BleSourceProtocol.FILTER_ALL_PASS -> "All pass"
+        else -> "Unknown (" + id + ")"
+    }
+
+    private fun showStatus(message: String, error: Boolean = false) {
+        status.text = message
+        status.setTextColor(if (error) pal.error else pal.onVariant)
+    }
+
+    private fun card(): MaterialCardView = MaterialCardView(this).apply {
+        radius = dp(28).toFloat()
+        cardBackgroundColor = pal.card
+        strokeWidth = 0
+        cardElevation = 0f
+        setContentPadding(dp(10), dp(10), dp(10), dp(10))
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+    private class PeqGraph(context: Context, private val palette: ThemeUtil.Palette) : View(context) {
+        private val grid = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = palette.divider
+            strokeWidth = resources.displayMetrics.density
+        }
+        private val curve = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = palette.primary
+            strokeWidth = 2.5f * resources.displayMetrics.density
+            style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
+        private val dots = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = palette.primary }
+        private val labels = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = palette.onVariant
+            textSize = 10f * resources.displayMetrics.density
+        }
+        private var points: List<PointDraft> = emptyList()
+
+        fun setPoints(value: List<PointDraft>) {
+            points = value.toList()
+            invalidate()
+        }
 
         override fun onDraw(canvas: Canvas) {
-            val w = width.toFloat(); val h = height.toFloat()
-            if (w <= 0 || h <= 0) return
-            for (k in 1..3) canvas.drawLine(0f, h * k / 4f, w, h * k / 4f, grid)
-            val p = prof ?: return
-            val fMin = 20.0; val fMax = 20000.0
-            val n = 160
-            val vals = DoubleArray(n + 1)
-            var lo = 0.0; var hi = 0.0
-            for (i in 0..n) {
-                val f = fMin * Math.pow(fMax / fMin, i.toDouble() / n)
-                vals[i] = MoondropEq.magnitudeDb(p, f)
-                if (i == 0 || vals[i] < lo) lo = vals[i]
-                if (i == 0 || vals[i] > hi) hi = vals[i]
+            super.onDraw(canvas)
+            val d = resources.displayMetrics.density
+            val left = 38f * d
+            val right = width - 12f * d
+            val top = 18f * d
+            val bottom = height - 30f * d
+            if (right <= left || bottom <= top) return
+
+            for (i in 0..4) {
+                val y = top + (bottom - top) * i / 4f
+                canvas.drawLine(left, y, right, y, grid)
             }
-            val span = Math.max(6.0, hi - lo)
-            val mid = (hi + lo) / 2
-            curve.reset()
-            for (i in 0..n) {
-                val x = w * i / n
-                val y = (h / 2 - (vals[i] - mid) / span * h * 0.9).toFloat()
-                if (i == 0) curve.moveTo(x, y) else curve.lineTo(x, y)
+            val xTicks = listOf(20, 100, 1000, 10000, 20000)
+            xTicks.forEach { hz ->
+                val x = xFor(hz, left, right)
+                canvas.drawLine(x, top, x, bottom, grid)
+                val label = when (hz) {
+                    1000 -> "1k"
+                    10000 -> "10k"
+                    else -> hz.toString()
+                }
+                canvas.drawText(label, x - 10f * d, height - 8f * d, labels)
             }
-            val area = Path(curve)
-            area.lineTo(w, h); area.lineTo(0f, h); area.close()
-            canvas.drawPath(area, fill)
-            canvas.drawPath(curve, line)
+            canvas.drawText("Gain raw", 2f * d, top + 4f * d, labels)
+            if (points.isEmpty()) return
+            val minGain = minOf(-1200, points.minOf { it.gainRaw }).toFloat()
+            val maxGain = maxOf(1200, points.maxOf { it.gainRaw }).toFloat()
+            val span = (maxGain - minGain).coerceAtLeast(1f)
+            val sorted = points.sortedBy { it.frequencyHz }
+            val path = Path()
+            sorted.forEachIndexed { i, p ->
+                val x = xFor(p.frequencyHz, left, right)
+                val y = bottom - ((p.gainRaw - minGain) / span) * (bottom - top)
+                if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                canvas.drawCircle(x, y, 3f * d, dots)
+            }
+            canvas.drawPath(path, curve)
+        }
+
+        private fun xFor(hz: Int, left: Float, right: Float): Float {
+            val safe = hz.coerceIn(20, 20000).toFloat()
+            val t = (kotlin.math.ln(safe / 20f) / kotlin.math.ln(1000f)).coerceIn(0f, 1f)
+            return left + t * (right - left)
         }
     }
 }

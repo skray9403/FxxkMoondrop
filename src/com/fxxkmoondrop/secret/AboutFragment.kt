@@ -1,500 +1,84 @@
 package com.fxxkmoondrop.secret
 
 import android.content.Intent
-import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
-import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.fragment.app.Fragment
+import com.google.android.material.card.MaterialCardView
 
-/**
- * "关于"页。
- *
- * alpha2.4: 首次按官方 M3 样式重构（头部信息卡 + 分组卡）。
- * alpha2.52: 二次重构，对齐 Material 3 规范：
- *  - 统一 16dp 横向栅格 / 8dp 纵向节奏，段落之间 24dp
- *  - 头部信息卡：96dp 图标容器（24dp 圆角）+ 24sp 名称 + 主色版本行 + 副标题
- *  - 行项一律复用 M3Ui.listRow + groupCard（去掉内联复制的卡片样式）
- *  - 新增「许可」分组，补齐开源信息
- */
+/** About page for the standalone MoonEar companion. */
 class AboutFragment : Fragment() {
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
-    private val repoUrl = "https://github.com/bqj6666/FxxkMoondrop"
-
-    private fun dp(v: Int): Int = Math.round(requireContext().resources.displayMetrics.density * v)
-
-    private fun spacer(h: Int): View = View(requireContext()).apply {
-        layoutParams = LinearLayout.LayoutParams(1, h)
-    }
-
-    /** 版本号：`V3.0.3`（与主页一致）。唯一来源是 PackageManager，不硬编码。
-     *  3.0.3: 去掉 "Alpha" 后缀 —— 3.0 起已是正式版，界面不该再挂 alpha 字样。 */
-    private fun verText(): String {
-        val vn: String? = try {
-            requireContext().packageManager
-                    .getPackageInfo(requireContext().packageName, 0).versionName
-        } catch (_: Exception) { null }
-        if (vn.isNullOrBlank()) return ""
-        return "V" + vn.removePrefix("alpha")
-    }
-
-    private fun openUrl(url: String) {
-        try {
-            requireActivity().startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-        } catch (_: Exception) { }
-    }
-
-    /** M3 段落卡：标题 + 正文（无描边、20dp 圆角，与 groupCard 同源样式） */
-    private fun noteCard(lead: String, body: String, pal: ThemeUtil.Palette): View {
-        val box = LinearLayout(requireContext())
-        box.orientation = LinearLayout.VERTICAL
-        box.setPadding(dp(16), dp(16), dp(16), dp(16))
-        val t1 = TextView(requireContext())
-        t1.text = lead
-        t1.textSize = 16f
-        t1.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-        t1.setTextColor(pal.onSurface)
-        box.addView(t1, LinearLayout.LayoutParams(-2, -2))
-        val t2 = TextView(requireContext())
-        t2.text = body
-        t2.textSize = 14f
-        t2.setTextColor(pal.onVariant)
-        t2.setLineSpacing(dp(2).toFloat(), 1.25f)
-        t2.setPadding(0, dp(8), 0, 0)
-        box.addView(t2, LinearLayout.LayoutParams(-1, -2))
-        return M3Ui.wrapInCard(requireContext(), pal, box)
-    }
-
-    /**
-     * 更新日志（3.2.11 起联网；3.2.12 起**只显示当前这一版**）。
-     *
-     * 此前它显示的是「最新版」的内容 —— 与「检查更新」查出新版本后展示的东西完全重复，
-     * 而用户点「更新日志」想看的恰恰是「我装的这版改了什么」。现在按本机版本号
-     * 拼出正式版 tag（`331-3.2.11`），精确取那一次发布的说明。
-     *
-     * 预发布构建在本机版本号上与正式版相同，仓库里却没有对应的正式 tag，
-     * 因此拉取会失败 —— 这时如实说「取不到」，并给出仓库里的完整更新日志入口，
-     * 而不是悄悄回退去显示别的版本的内容。
-     */
-    private fun showChangelog() {
-        val pal = ThemeUtil.Palette(requireContext())
-        val (dlg, body) = M3Ui.materialDialog(requireContext(), pal.primary, pal.card)
-
-        body.addView(M3Ui.dialogTitle(requireContext(),
-                Lang.t("更新日志", "Changelog"), pal.onSurface), LinearLayout.LayoutParams(-1, -2))
-
-        val ver = TextView(requireContext())
-        ver.text = verText()
-        ver.textSize = 14f
-        ver.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-        ver.setTextColor(pal.primary)
-        ver.gravity = Gravity.CENTER_HORIZONTAL
-        body.addView(ver, LinearLayout.LayoutParams(-1, -2))
-        body.addView(spacer(dp(16)))
-
-        val content = LinearLayout(requireContext())
-        content.orientation = LinearLayout.VERTICAL
-        content.addView(M3Ui.loadingRow(requireContext(), pal,
-                Lang.t("正在获取更新日志…", "Fetching the changelog…")),
-                LinearLayout.LayoutParams(-1, -2))
-
-        // 宽度 = 弹窗宽（0.84 屏宽，见 M3Ui.materialDialog）减去 body 左右各 24dp 内边距
-        val availW = (resources.displayMetrics.widthPixels * 0.84f).toInt() - dp(48)
-        val maxH = (resources.displayMetrics.heightPixels * 0.52f).toInt()
-
-        val contentSv = ScrollView(requireContext())
-        contentSv.addView(content)
-        body.addView(contentSv,
-                LinearLayout.LayoutParams(-1, LinearLayout.LayoutParams.WRAP_CONTENT))
-
-        body.addView(spacer(dp(16)))
-        val actions = LinearLayout(requireContext())
-        actions.orientation = LinearLayout.HORIZONTAL
-        actions.gravity = Gravity.END or Gravity.CENTER_VERTICAL
-        actions.addView(M3Ui.textButton(requireContext(), pal,
-                Lang.t("关闭", "Close")) { dlg.dismiss() },
-                LinearLayout.LayoutParams(-2, -2))
-        body.addView(actions, LinearLayout.LayoutParams(-1, -2))
-        dlg.show()
-
-        val tag = UpdateChecker.localStableTag(requireContext())
-        fetchReleaseBody(tag) { notes ->
-            if (!dlg.isShowing) return@fetchReleaseBody
-            // 远端拿不到就用 APK 内置的 CHANGELOG 兜底（离线也能看到本版说明）
-            val body = notes?.takeIf { it.isNotBlank() } ?: localChangelogSection()
-            renderChangelog(content, contentSv, body, availW, maxH, pal)
-        }
-    }
-
-    /** 后台拉某个 tag 的发布说明，结果回主线程。 */
-    private fun fetchReleaseBody(tag: String?, onDone: (String?) -> Unit) {
-        val appCtx = requireContext().applicationContext
-        Thread {
-            val body = try {
-                UpdateChecker.releaseBody(appCtx, tag)
-            } catch (_: Throwable) {
-                null
-            }
-            activity?.runOnUiThread { if (isAdded) onDone(body) }
-        }.start()
-    }
-
-    /**
-     * 渲染本版更新日志并重算滚动高度。
-     *
-     * 高度必须重算：初始高度是按 loading 占位量出来的，换成整篇日志后不重算，
-     * 要么留一大片空白，要么内容被截断。
-     */
-    /**
-     * 从 APK 内置的 assets/CHANGELOG.md 里截出「本机版本」那一段。
-     *
-     * 为什么需要：Release 说明走 GitHub API / atom，离线或接口异常时整块空白；
-     * 打包时把 CHANGELOG 一起带上，更新日志就永远有内容可看（远端仍优先）。
-     */
-    private fun localChangelogSection(): String? {
-        return try {
-            val ctx = requireContext()
-            val text = ctx.assets.open("CHANGELOG.md").bufferedReader().use { it.readText() }
-            val name = try {
-                @Suppress("DEPRECATION")
-                ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName
-            } catch (_: Throwable) { null } ?: return null
-            val idx = text.indexOf("## " + name)
-            if (idx < 0) return null
-            val rest = text.substring(idx)
-            val next = rest.indexOf("\n## ", 4)
-            (if (next > 0) rest.substring(0, next) else rest).trim().ifBlank { null }
-        } catch (_: Throwable) { null }
-    }
-
-    private fun renderChangelog(content: LinearLayout, sv: ScrollView, notes: String?,
-                                availW: Int, maxH: Int, pal: ThemeUtil.Palette) {
-        try {
-            content.removeAllViews()
-            val ctx = requireContext()
-
-            if (notes.isNullOrBlank()) {
-                val t = TextView(ctx)
-                t.text = Lang.t(
-                        "取不到本版的更新说明。\n\n仓库里没有与本机版本对应的正式版发布 —— " +
-                                "预发布构建属于这种情况。完整更新日志见 GitHub 上的 CHANGELOG.md。",
-                        "No release notes for this build.\n\nThe repository has no official release " +
-                                "matching this version \u2014 pre-release builds are the usual case. " +
-                                "See CHANGELOG.md on GitHub for the full history.")
-                t.textSize = 14f
-                t.setTextColor(pal.onVariant)
-                t.setLineSpacing(dp(2).toFloat(), 1.25f)
-                content.addView(t, LinearLayout.LayoutParams(-1, -2))
-            } else {
-                val t = TextView(ctx)
-                t.text = prettyNotes(notes)
-                t.textSize = 14f
-                t.setTextColor(pal.onVariant)
-                t.setLineSpacing(dp(2).toFloat(), 1.25f)
-                content.addView(t, LinearLayout.LayoutParams(-1, -2))
-            }
-
-            // 与初次构建同一套测量方式，避免顺序不同造成高度跳变
-            content.measure(
-                    View.MeasureSpec.makeMeasureSpec(availW, View.MeasureSpec.EXACTLY),
-                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
-            val lp = sv.layoutParams
-            lp.height = if (content.measuredHeight > maxH) maxH
-                        else LinearLayout.LayoutParams.WRAP_CONTENT
-            sv.layoutParams = lp
-        } catch (t: Throwable) {
-            // 弹窗里的渲染失败不值得打扰用户
-        }
-    }
-
-    // ── 3.2.11: 联网检查更新 ──────────────────────────────────────
-
-    /**
-     * 后台检查更新，结果回主线程。
-     *
-     * UpdateChecker.check 会阻塞（最长 5s 连接 + 8s 读取），必须在子线程。
-     * 联网开关关闭时它内部直接返回 Disabled，不会建立任何连接。
-     */
-    private fun checkUpdate(force: Boolean,
-                            onResult: (UpdateChecker.Result) -> Unit) {
-        val appCtx = requireContext().applicationContext
-        Thread {
-            val res = try {
-                UpdateChecker.check(appCtx, force)
-            } catch (t: Throwable) {
-                UpdateChecker.Result.Failed      // 兜底：联网问题绝不允许冒泡到 UI
-            }
-            activity?.runOnUiThread { if (isAdded) onResult(res) }
-        }.start()
-    }
-
-    /**
-     * 「检查更新」行：强制重查（绕过缓存），结果用一个小弹窗明确告知。
-     *
-     * 两个动作必须在**同一行**、右对齐、间距 8dp，确认动作在最右（M3 弹窗规范）。
-     * 「下载」要等联网结果回来才知道有没有，所以先建好动作行、再把按钮插进去：
-     * 直接 body.addView 追加会另起一行，把「关闭」和「下载」拆成上下两块，
-     * 看上去根本不像一个弹窗。
-     */
-    private fun manualCheckUpdate() {
-        val pal = ThemeUtil.Palette(requireContext())
-        val (dlg, body) = M3Ui.materialDialog(requireContext(), pal.primary, pal.card)
-        body.addView(M3Ui.dialogTitle(requireContext(),
-                Lang.t("检查更新", "Check for updates"), pal.onSurface),
-                LinearLayout.LayoutParams(-1, -2))
-        body.addView(spacer(dp(10)))
-
-        val msg = TextView(requireContext())
-        msg.text = Lang.t("正在检查…", "Checking…")
-        msg.textSize = 14f
-        msg.setTextColor(pal.onVariant)
-        msg.setLineSpacing(dp(2).toFloat(), 1.25f)
-        body.addView(msg, LinearLayout.LayoutParams(-1, -2))
-
-        // 有新版本时，这里显示**新版本**的更新内容 —— 这才是用户点「检查更新」
-        // 之后真正想看的东西。与「更新日志」（只讲本机这一版）各司其职、互不重复。
-        val notesBox = LinearLayout(requireContext())
-        notesBox.orientation = LinearLayout.VERTICAL
-        val availW = (resources.displayMetrics.widthPixels * 0.84f).toInt() - dp(48)
-        val maxH = (resources.displayMetrics.heightPixels * 0.42f).toInt()
-        val notesSv = ScrollView(requireContext())
-        notesSv.addView(notesBox)
-        notesSv.visibility = View.GONE
-        body.addView(notesSv, LinearLayout.LayoutParams(-1, LinearLayout.LayoutParams.WRAP_CONTENT))
-
-        body.addView(spacer(dp(16)))
-        val actions = LinearLayout(requireContext())
-        actions.orientation = LinearLayout.HORIZONTAL
-        actions.gravity = Gravity.END or Gravity.CENTER_VERTICAL
-        actions.addView(M3Ui.textButton(requireContext(), pal,
-                Lang.t("关闭", "Close")) { dlg.dismiss() },
-                LinearLayout.LayoutParams(-2, -2))
-        body.addView(actions, LinearLayout.LayoutParams(-1, -2))
-        dlg.show()
-
-        checkUpdate(force = true) { res ->
-            if (!dlg.isShowing) return@checkUpdate
-            msg.text = when (res) {
-                is UpdateChecker.Result.Disabled ->
-                    Lang.t("联网检查更新已关闭，可在「设置 → 更新」中开启",
-                            "Online update check is off; enable it in Settings → Updates")
-                is UpdateChecker.Result.UpToDate ->
-                    Lang.t("已是最新版本（" + res.currentLabel + "）",
-                            "You are up to date (" + res.currentLabel + ")")
-                is UpdateChecker.Result.Available ->
-                    Lang.t("发现新版本 " + (res.info.versionName ?: res.info.tag),
-                            "New version available: " + (res.info.versionName ?: res.info.tag))
-                is UpdateChecker.Result.Failed ->
-                    Lang.t("检查失败，请确认网络后重试",
-                            "Check failed; verify your connection and try again")
-            }
-            if (res is UpdateChecker.Result.Available) {
-                val text = res.info.notes
-                val tv = TextView(requireContext())
-                tv.text = if (text.isNullOrBlank())
-                    Lang.t("这一版没有提供更新说明。", "This release provides no notes.")
-                else prettyNotes(text)
-                tv.textSize = 14f
-                tv.setTextColor(pal.onVariant)
-                tv.setLineSpacing(dp(2).toFloat(), 1.25f)
-                notesBox.addView(tv, LinearLayout.LayoutParams(-1, -2))
-                // 量一次再决定要不要限高：短日志贴合高度，长日志内部滚动
-                notesBox.measure(
-                        View.MeasureSpec.makeMeasureSpec(availW, View.MeasureSpec.EXACTLY),
-                        View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
-                // body 是 LinearLayout，这里必须显式 new 一个带类型的 LayoutParams ——
-                // 就地改 layoutParams 的话拿到的是基类，没有 topMargin
-                notesSv.layoutParams = LinearLayout.LayoutParams(-1,
-                        if (notesBox.measuredHeight > maxH) maxH
-                        else LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(12) }
-                notesSv.visibility = View.VISIBLE
-
-                // 插到动作行最右（「关闭」之后）—— 确认动作放最右是 M3 的规定顺序
-                val lp = LinearLayout.LayoutParams(-2, -2)
-                lp.marginStart = dp(8)
-                actions.addView(M3Ui.filledButton(requireActivity(), pal,
-                        Lang.t("下载", "Download")) { openUrl(res.info.downloadUrl) }, lp)
-            }
-        }
-    }
-
-    /** 把 release body 的 markdown 粗加工成可读纯文本（不做完整渲染，够看即可）。 */
-    private fun prettyNotes(raw: String): String {
-        val out = ArrayList<String>()
-        for (line in raw.split("\n")) {
-            val t = line.trim()
-            when {
-                t.isEmpty() -> if (out.isNotEmpty() && out.last().isNotEmpty()) out.add("")
-                t.startsWith("> [!") -> Unit                    // GitHub 警示块标记
-                t == ">" -> Unit
-                t.startsWith(">") -> out.add(t.removePrefix(">").trim())
-                t.startsWith("####") -> out.add(t.removePrefix("####").trim())
-                t.startsWith("###") -> out.add(t.removePrefix("###").trim())
-                t.startsWith("##") -> out.add(t.removePrefix("##").trim())
-                t.startsWith("#") -> out.add(t.removePrefix("#").trim())
-                t.startsWith("- ") || t.startsWith("* ") -> out.add("· " + t.substring(2))
-                else -> out.add(t)
-            }
-        }
-        return out.joinToString("\n").trim()
-    }
-
-    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?,
-                              savedInstanceState: Bundle?): View? {
-        super.onCreateView(inflater, container, savedInstanceState)
+    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, state: Bundle?): View {
         Lang.refresh(requireContext())
         val pal = ThemeUtil.Palette(requireContext())
-        val act = requireActivity()
-
-        val root = LinearLayout(requireContext())
-        root.orientation = LinearLayout.VERTICAL
-        root.setBackgroundColor(pal.surface)
-        val resId = resources.getIdentifier("status_bar_height", "dimen", "android")
-        val statusBarH = if (resId > 0) resources.getDimensionPixelSize(resId) else 0
-        root.setPadding(0, statusBarH, 0, 0)
-        // alpha2.53: M3 LargeTopAppBar —— 大标题随滚动收缩（对齐官方）
-        val page = M3Ui.largeHeaderPage(act, pal, Lang.t("关于", "About"))
-
-        val sv = page.sv
-        val box = LinearLayout(requireContext())
-        box.orientation = LinearLayout.VERTICAL
-        box.setPadding(dp(16), dp(8), dp(16), dp(28))
-
-        // ── 头部卡：居中图标 + 旋转弧环 + 名称 + 两个信息 chip + 两个动作按钮 ──
-        val header = LinearLayout(requireContext())
-        header.orientation = LinearLayout.VERTICAL
-        header.gravity = Gravity.CENTER_HORIZONTAL
-        header.setPadding(dp(24), dp(24), dp(24), dp(24))
-
-        // 图标 + Material 圆形加载指示器（取图标主色，与图标同色系）
-        val iconWrap = android.widget.FrameLayout(requireContext())
-        // 图标背景：M3 Expressive 形变圆形（12 瓣波浪圆，缓慢自转 + 呼吸），取图标主色
-        val iconColor = AppIconColor.of(requireContext(), pal.primary)
-        // 形变圆背景：比图标大一整圈，转速与呼吸都放慢
-        val badge = ScallopView(requireContext(),
-                (iconColor and 0x00FFFFFF) or 0x66000000, 14000L, 2400L)
-        iconWrap.addView(badge, android.widget.FrameLayout.LayoutParams(dp(136), dp(136),
-                Gravity.CENTER))
-        val iconView = ImageView(requireContext())
-        try {
-            iconView.setImageDrawable(requireContext().packageManager
-                    .getApplicationIcon(requireContext().packageName))
-        } catch (_: Exception) { }
-        iconWrap.addView(iconView, android.widget.FrameLayout.LayoutParams(dp(80), dp(80),
-                Gravity.CENTER))
-        header.addView(iconWrap, LinearLayout.LayoutParams(dp(136), dp(136)))
-
-        header.addView(spacer(dp(16)))
-        val appTitle = TextView(requireContext())
-        appTitle.text = "MoonEar"
-        appTitle.textSize = 26f
-        appTitle.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-        appTitle.setTextColor(pal.onSurface)
-        header.addView(appTitle, LinearLayout.LayoutParams(-2, -2))
-
-        header.addView(spacer(dp(6)))
-        val tagline = TextView(requireContext())
-        tagline.text = Lang.t("Moondrop 蓝牙耳机助手", "Moondrop Bluetooth Earbud Assistant")
-        tagline.textSize = 14f
-        tagline.setTextColor(pal.onVariant)
-        tagline.gravity = Gravity.CENTER
-        header.addView(tagline, LinearLayout.LayoutParams(-2, -2))
-
-        // 信息 chip：版本 + 许可证
-        header.addView(spacer(dp(14)))
-        val chipRow = LinearLayout(requireContext())
-        chipRow.orientation = LinearLayout.HORIZONTAL
-        chipRow.gravity = Gravity.CENTER
-        fun infoChip(text: String): TextView {
-            val tv = TextView(requireContext())
-            tv.text = text
-            tv.textSize = 13f
-            tv.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            tv.setTextColor(pal.onSurface)
-            tv.gravity = Gravity.CENTER
-            tv.setPadding(dp(14), dp(7), dp(14), dp(7))
-            val cbg = GradientDrawable()
-            cbg.cornerRadius = dp(16).toFloat()
-            cbg.setColor(android.graphics.Color.TRANSPARENT)
-            cbg.setStroke(dp(1), pal.cardStroke)
-            tv.background = cbg
-            return tv
+        val scroll = ScrollView(requireContext()).apply {
+            setBackgroundColor(pal.surface)
+            setPadding(dp(16), dp(16), dp(16), dp(28))
         }
-        chipRow.addView(infoChip(verText()), LinearLayout.LayoutParams(-2, -2))
-        val chip2 = infoChip("GPL-3.0")
-        val c2lp = LinearLayout.LayoutParams(-2, -2)
-        c2lp.marginStart = dp(8)
-        chipRow.addView(chip2, c2lp)
-        header.addView(chipRow, LinearLayout.LayoutParams(-2, -2))
-
-        // 动作按钮：Star on GitHub（主）+ 反馈（次）
-        header.addView(spacer(dp(16)))
-        val btnRow = LinearLayout(requireContext())
-        btnRow.orientation = LinearLayout.HORIZONTAL
-        btnRow.gravity = Gravity.CENTER
-        val star = M3Ui.filledButton(requireActivity(), pal, Lang.t("GitHub 仓库", "Repository")) {
-            openUrl("https://github.com/bqj6666/FxxkMoondrop")
+        val body = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
         }
-        // 「检测更新」同样受设置页「联网检查更新」开关控制：
-        // 关着就不出现（关着时点它必然失败，不如不显示），与下方「更新日志」保持一致。
-        val updateEnabled = UpdateChecker.isEnabled(requireContext())
-        btnRow.addView(star, LinearLayout.LayoutParams(0, -2, 1f))
-        if (updateEnabled) {
-            val updBtn = M3Ui.filledButton(requireActivity(), pal,
-                    Lang.t("检测更新", "Check updates")) { manualCheckUpdate() }
-            val ilp2 = LinearLayout.LayoutParams(0, -2, 1f)
-            ilp2.marginStart = dp(8)
-            btnRow.addView(updBtn, ilp2)
+        scroll.addView(body, ScrollView.LayoutParams(-1, -2))
+        body.addView(TextView(requireContext()).apply {
+            text = "MoonEar"
+            textSize = 30f
+            typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
+            setTextColor(pal.onSurface)
+        })
+        body.addView(TextView(requireContext()).apply {
+            text = Lang.t("Moondrop Space Travel 2 蓝牙伴侣", "A Bluetooth companion for Moondrop Space Travel 2")
+            textSize = 14f
+            setTextColor(pal.onVariant)
+            setPadding(0, dp(4), 0, dp(18))
+        })
+        val card = MaterialCardView(requireContext()).apply {
+            radius = dp(26).toFloat()
+            cardBackgroundColor = pal.card
+            strokeWidth = 0
+            cardElevation = 0f
+            setContentPadding(dp(16), dp(16), dp(16), dp(16))
         }
-        header.addView(btnRow, LinearLayout.LayoutParams(-1, -2))
-        box.addView(M3Ui.wrapInCard(requireContext(), pal, header), LinearLayout.LayoutParams(-1, -2))
-
-        // ── 项目 ──
-        box.addView(spacer(dp(24)))
-        box.addView(M3Ui.sectionTitle(act, pal, Lang.t("项目", "Project")))
-        // 「检查更新」「更新日志」都是联网功能：开关关着还留着入口，
-        // 点下去必然失败，不如干脆不显示。
-        val projRows = ArrayList<View>()
-        if (UpdateChecker.isEnabled(requireContext())) {
-            projRows.add(M3Ui.listRow(act, pal, R.drawable.ic_description,
-                    Lang.t("更新日志", "Changelog"),
-                    Lang.t("本版变更", "Changes in this build"),
-                    M3Ui.chevron(act, pal.onVariant)) { showChangelog() })
+        card.addView(TextView(requireContext()).apply {
+            text = Lang.t(
+                "此版本专注于 Space Travel 2：电量、四种降噪模式、三档声音增益与 9ECA 参数均衡器。",
+                "This build focuses on Space Travel 2: battery, four noise-control modes, three gain levels and the 9ECA parametric equalizer."
+            )
+            textSize = 14f
+            setTextColor(pal.onSurface)
+        })
+        body.addView(card)
+        body.addView(TextView(requireContext()).apply {
+            text = Lang.t("源代码与版本信息", "Source code and version information")
+            textSize = 14f
+            setTextColor(pal.onVariant)
+            setPadding(0, dp(22), 0, dp(8))
+        })
+        val link = MaterialCardView(requireContext()).apply {
+            radius = dp(22).toFloat()
+            cardBackgroundColor = pal.card
+            strokeWidth = 0
+            cardElevation = 0f
+            isClickable = true
+            setOnClickListener {
+                runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/skray9403/FxxkMoondrop"))) }
+            }
         }
-        projRows.add(M3Ui.listRow(act, pal, R.drawable.ic_bug_report,
-                Lang.t("反馈问题", "Report an issue"),
-                Lang.t("提交适配问题与日志", "Submit an issue with logs"),
-                M3Ui.chevron(act, pal.onVariant)) { openUrl(repoUrl + "/issues") })
-        projRows.add(M3Ui.listRow(act, pal, R.drawable.ic_person,
-                Lang.t("作者", "Author"), "bqj6666", null, null))
-        projRows.add(M3Ui.listRow(act, pal, R.drawable.ic_group,
-                Lang.t("协助者", "Contributors"),
-                Lang.t("各开源 AI 模型（DeepSeek · Qwen · Kimi · Llama 等）",
-                        "Open-source AI models (DeepSeek, Qwen, Kimi, Llama and more)"), null, null))
-        box.addView(M3Ui.groupCard(act, pal, *projRows.toTypedArray()),
-                LinearLayout.LayoutParams(-1, -2))
-
-        // ── 许可 ──
-        box.addView(spacer(dp(24)))
-        box.addView(M3Ui.sectionTitle(act, pal, Lang.t("许可", "License")))
-        box.addView(M3Ui.groupCard(act, pal,
-                M3Ui.listRow(act, pal, R.drawable.ic_copyright,
-                        Lang.t("开源许可", "Open-source license"),
-                        Lang.t("GNU GPL v3.0 · 允许修改与再分发",
-                                "GNU GPL v3.0 · modification and redistribution allowed"),
-                        M3Ui.chevron(act, pal.onVariant)) { openUrl(repoUrl + "/blob/main/LICENSE") }),
-                LinearLayout.LayoutParams(-1, -2))
-
-        sv.addView(box)
-        root.addView(page.container, LinearLayout.LayoutParams(-1, 0, 1f))
-        return root
+        val label = TextView(requireContext()).apply {
+            text = "github.com/skray9403/FxxkMoondrop"
+            textSize = 14f
+            setTextColor(pal.primary)
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+        }
+        link.addView(label)
+        body.addView(link)
+        return scroll
     }
 }
