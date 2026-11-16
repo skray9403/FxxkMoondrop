@@ -283,18 +283,20 @@ class OverviewFragment : Fragment() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
         }
-        val managePairing = MaterialButton(requireContext(), null,
-            com.google.android.material.R.attr.materialButtonTextButton).apply {
+        val managePairing = MaterialButton(requireContext()).apply {
             text = "Bluetooth settings"
             isAllCaps = false
             setTextColor(pal.onSecondaryContainer)
+            backgroundTintList = android.content.res.ColorStateList.valueOf(pal.secondaryContainer)
+            elevation = 0f
             setOnClickListener { openBluetoothSettings() }
         }
-        val disconnect = MaterialButton(requireContext(), null,
-            com.google.android.material.R.attr.materialButtonTextButton).apply {
+        val disconnect = MaterialButton(requireContext()).apply {
             text = "Disconnect"
             isAllCaps = false
             setTextColor(pal.onSecondaryContainer)
+            backgroundTintList = android.content.res.ColorStateList.valueOf(pal.secondaryContainer)
+            elevation = 0f
             setOnClickListener {
                 connectionInProgress = false
                 connectionStage = null
