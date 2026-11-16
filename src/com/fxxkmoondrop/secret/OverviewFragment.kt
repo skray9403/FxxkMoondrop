@@ -312,31 +312,47 @@ class OverviewFragment : Fragment() {
     }
 
         private fun buildNoiseSection() {
-        addSection("Noise control", "Choose how much of the outside world you hear")
-
-        ancGrid = LinearLayout(requireContext()).apply {
+        noiseSection = LinearLayout(requireContext()).apply {
             orientation = LinearLayout.VERTICAL
         }
-        for (rowIndex in 0..1) {
-            val row = LinearLayout(requireContext()).apply {
-                orientation = LinearLayout.HORIZONTAL
-            }
-            for (column in 0..1) {
-                val item = ancModes[rowIndex * 2 + column]
-                row.addView(createAncTile(item.first, item.second, item.third),
-                    LinearLayout.LayoutParams(0, dp(66), 1f).also {
-                        if (column == 0) it.marginEnd = dp(6) else it.marginStart = dp(6)
-                        if (rowIndex == 1) it.topMargin = dp(8)
-                    })
-            }
-            ancGrid.addView(row, LinearLayout.LayoutParams(-1, -2))
+        noiseSection.addView(sectionHeading("Active noise control", "Choose how much of the outside world you hear"))
+        ancGrid = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
         }
-        root.addView(ancGrid)
+        ancModes.forEachIndexed { index, item ->
+            ancGrid.addView(createAncTile(item.first, item.second, item.third),
+                LinearLayout.LayoutParams(0, dp(86), 1f).also {
+                    if (index != 0) it.marginStart = dp(3)
+                    if (index != ancModes.lastIndex) it.marginEnd = dp(3)
+                })
+        }
+        noiseSection.addView(ancGrid)
+        root.addView(noiseSection, columnParams(top = 8, bottom = 16))
     }
 
-    private fun createAncTile(mode: Int, label: String, symbol: String): MaterialCardView {
+    private fun sectionHeading(title: String, subtitle: String): LinearLayout {
+        val block = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        block.addView(TextView(requireContext()).apply {
+            text = title
+            textSize = 18f
+            setTextColor(pal.onSurface)
+            typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
+        })
+        block.addView(TextView(requireContext()).apply {
+            text = subtitle
+            textSize = 12f
+            setTextColor(pal.onVariant)
+            setPadding(0, dp(3), 0, dp(10))
+        })
+        return block
+    }
+
+        private fun createAncTile(mode: Int, label: String, symbol: String): MaterialCardView {
         val card = MaterialCardView(requireContext()).apply {
-            radius = dp(20).toFloat()
+            radius = dp(18).toFloat()
             setCardBackgroundColor(pal.card)
             strokeWidth = dp(1)
             strokeColor = pal.cardStroke
@@ -344,43 +360,46 @@ class OverviewFragment : Fragment() {
             isClickable = true
             isFocusable = true
             tag = mode
+            setContentPadding(dp(4), dp(8), dp(4), dp(8))
         }
-        val row = LinearLayout(requireContext()).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(14), dp(8), dp(8), dp(8))
+        val content = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
         }
         val glyph = TextView(requireContext()).apply {
             text = symbol
-            textSize = 23f
+            textSize = 22f
             gravity = Gravity.CENTER
             setTextColor(pal.onVariant)
         }
         val title = TextView(requireContext()).apply {
             text = label
-            textSize = 13f
+            textSize = 10.5f
+            gravity = Gravity.CENTER
+            maxLines = 2
             setTextColor(pal.onSurface)
             typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
-            setPadding(dp(10), 0, 0, 0)
+            setPadding(0, dp(4), 0, 0)
         }
-        row.addView(glyph, LinearLayout.LayoutParams(dp(28), -2))
-        row.addView(title, LinearLayout.LayoutParams(0, -2, 1f))
-        card.addView(row)
+        content.addView(glyph, LinearLayout.LayoutParams(-1, dp(28)))
+        content.addView(title, LinearLayout.LayoutParams(-1, -2))
+        card.addView(content)
         card.setOnClickListener {
             if (!GaiaBleClient.getInstance().isGaiaReady()) return@setOnClickListener
             AncBridge.setAncMode(mode)
             refreshAncSelection()
         }
-        card.tag = mode
         card.setTag(android.R.id.title, glyph)
         card.setTag(android.R.id.text1, title)
         ancTiles.add(card to mode)
         return card
     }
 
-    private fun buildGainSection() {
-        addSection("Sound gain", "Set the output level")
-
+        private fun buildGainSection() {
+        gainSection = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        gainSection.addView(sectionHeading("Sound gain", "Set the output level"))
         gainGroup = MaterialButtonToggleGroup(requireContext()).apply {
             isSingleSelection = true
             isSelectionRequired = true
@@ -399,8 +418,8 @@ class OverviewFragment : Fragment() {
                 insetBottom = 0
             }
             gainGroup.addView(button, LinearLayout.LayoutParams(0, dp(58), 1f).also {
-                if (index != 0) it.marginStart = dp(4)
-                if (index != 2) it.marginEnd = dp(4)
+                if (index != 0) it.marginStart = dp(3)
+                if (index != 2) it.marginEnd = dp(3)
             })
         }
         gainGroup.addOnButtonCheckedListener { group, checkedId, isChecked ->
@@ -414,12 +433,15 @@ class OverviewFragment : Fragment() {
                 }
             }
         }
-        root.addView(gainGroup)
+        gainSection.addView(gainGroup)
+        root.addView(gainSection, columnParams(top = 4, bottom = 16))
     }
 
-    private fun buildEqualizerSection() {
-        addSection("Equalizer", "Fine-tune the sound to your preference")
-
+        private fun buildEqualizerSection() {
+        equalizerSection = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        equalizerSection.addView(sectionHeading("More controls", "Fine-tune your listening experience"))
         eqCard = MaterialCardView(requireContext()).apply {
             radius = dp(22).toFloat()
             setCardBackgroundColor(pal.card)
@@ -432,11 +454,10 @@ class OverviewFragment : Fragment() {
                 if (isEnabled) startActivity(Intent(requireContext(), EqEditorActivity::class.java))
             }
         }
-
         val row = LinearLayout(requireContext()).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(18), dp(16), dp(16), dp(16))
+            setPadding(dp(18), dp(14), dp(16), dp(14))
         }
         val icon = TextView(requireContext()).apply {
             text = "≋"
@@ -469,10 +490,11 @@ class OverviewFragment : Fragment() {
             setTextColor(pal.onVariant)
         })
         eqCard.addView(row)
-        root.addView(eqCard, columnParams(top = 2))
+        equalizerSection.addView(eqCard)
+        root.addView(equalizerSection, columnParams(top = 2, bottom = 16))
     }
 
-    private fun addSection(title: String, subtitle: String) {
+        private fun addSection(title: String, subtitle: String) {
         val block = LinearLayout(requireContext()).apply {
             orientation = LinearLayout.VERTICAL
         }
