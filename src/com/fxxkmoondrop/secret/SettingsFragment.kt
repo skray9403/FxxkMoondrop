@@ -134,8 +134,6 @@ class SettingsFragment : Fragment() {
         setCardBackgroundColor(pal.card)
         strokeWidth = 0
         cardElevation = 0f
-        isClickable = true
-        isFocusable = true
     }
 
     private fun toggleCard(
@@ -171,9 +169,6 @@ class SettingsFragment : Fragment() {
             setOnCheckedChangeListener { _, value -> changed(value) }
         })
         card.addView(row)
-        card.setOnClickListener {
-            // Leave switch interaction to the switch itself.
-        }
         return card
     }
 
@@ -182,7 +177,11 @@ class SettingsFragment : Fragment() {
         summary: String,
         action: () -> Unit
     ): MaterialCardView {
-        val card = card().apply { setOnClickListener { action() } }
+        val card = card().apply {
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { action() }
+        }
         val row = LinearLayout(requireContext()).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
