@@ -196,29 +196,29 @@ class OverviewFragment : Fragment() {
     }
 
     private fun buildProductCard() {
-        val card = MaterialCardView(requireContext()).apply {
-            radius = dp(30).toFloat()
+        // Pixel Buds-style connection prompt: compact, calm, and only shown while disconnected.
+        connectionCard = MaterialCardView(requireContext()).apply {
+            radius = dp(24).toFloat()
             setCardBackgroundColor(pal.secondaryContainer)
             strokeWidth = 0
             cardElevation = 0f
-            setContentPadding(dp(12), dp(10), dp(12), dp(18))
+            setContentPadding(dp(18), dp(16), dp(18), dp(16))
         }
         val content = LinearLayout(requireContext()).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
         }
-        content.addView(ProductIllustrationView(requireContext(), pal),
-            LinearLayout.LayoutParams(-1, dp(176)))
-
         content.addView(TextView(requireContext()).apply {
-            text = "MOONDROP  ·  SPACE TRAVEL 2"
-            textSize = 11f
-            letterSpacing = 0.12f
+            text = "Connect your Space Travel 2"
+            textSize = 17f
             setTextColor(pal.onSecondaryContainer)
-            gravity = Gravity.CENTER
             typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
-        }, columnParams(top = 2, bottom = 12))
-
+        })
+        content.addView(TextView(requireContext()).apply {
+            text = "Open the charging case and keep both earbuds nearby."
+            textSize = 13f
+            setTextColor(pal.onSecondaryContainer)
+            setPadding(0, dp(4), 0, dp(12))
+        })
         connectButton = MaterialButton(requireContext()).apply {
             text = "Connect"
             isAllCaps = false
@@ -226,14 +226,16 @@ class OverviewFragment : Fragment() {
                 if (pairingRequired) openBluetoothSettings() else connectToHeadset()
             }
         }
-        content.addView(connectButton, LinearLayout.LayoutParams(-1, dp(52)))
-        card.addView(content)
-        root.addView(card, columnParams(bottom = 22))
+        content.addView(connectButton, LinearLayout.LayoutParams(-1, dp(48)))
+        connectionCard.addView(content)
+        root.addView(connectionCard, columnParams(bottom = 16))
     }
 
-    private fun buildBatterySection() {
-        addSection("Battery", "Your earbuds' current charge")
-
+        private fun buildBatterySection() {
+        batterySection = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        batterySection.addView(sectionHeading("Battery", "Left and right earbud charge"))
         val card = MaterialCardView(requireContext()).apply {
             radius = dp(26).toFloat()
             setCardBackgroundColor(pal.card)
@@ -250,47 +252,66 @@ class OverviewFragment : Fragment() {
             label = "Left"
             setLevel(-1)
         }
+        caseBattery = BatteryRingView(requireContext(), pal).apply {
+            label = "Case"
+            setLevel(-1)
+        }
         rightBattery = BatteryRingView(requireContext(), pal).apply {
             label = "Right"
             setLevel(-1)
         }
         row.addView(leftBattery, LinearLayout.LayoutParams(0, dp(122), 1f))
+        row.addView(caseBattery, LinearLayout.LayoutParams(0, dp(122), 1f))
         row.addView(rightBattery, LinearLayout.LayoutParams(0, dp(122), 1f))
         card.addView(row)
-        root.addView(card)
+        batterySection.addView(card)
+        batterySection.addView(TextView(requireContext()).apply {
+            text = "Case battery is not reported by the current earbud protocol."
+            textSize = 12f
+            setTextColor(pal.onVariant)
+            setPadding(dp(4), dp(8), dp(4), 0)
+        })
 
+        val actionsCard = MaterialCardView(requireContext()).apply {
+            radius = dp(22).toFloat()
+            setCardBackgroundColor(pal.secondaryContainer)
+            strokeWidth = 0
+            cardElevation = 0f
+            setContentPadding(dp(4), dp(4), dp(4), dp(4))
+        }
         actionRow = LinearLayout(requireContext()).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
         }
-        val forget = MaterialButton(requireContext(), null,
-            com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-            text = "Forget"
+        val managePairing = MaterialButton(requireContext(), null,
+            com.google.android.material.R.attr.materialButtonTextButton).apply {
+            text = "Bluetooth settings"
             isAllCaps = false
+            setTextColor(pal.onSecondaryContainer)
             setOnClickListener { openBluetoothSettings() }
         }
         val disconnect = MaterialButton(requireContext(), null,
-            com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            com.google.android.material.R.attr.materialButtonTextButton).apply {
             text = "Disconnect"
             isAllCaps = false
+            setTextColor(pal.onSecondaryContainer)
             setOnClickListener {
                 connectionInProgress = false
+                connectionStage = null
                 connectionError = null
                 connectionTimeout?.let { handler.removeCallbacks(it) }
                 GaiaBleClient.getInstance().shutdown()
                 refreshUi()
             }
         }
-        actionRow.addView(forget, LinearLayout.LayoutParams(0, dp(48), 1f).also {
-            it.marginEnd = dp(6)
-        })
-        actionRow.addView(disconnect, LinearLayout.LayoutParams(0, dp(48), 1f).also {
-            it.marginStart = dp(6)
-        })
-        root.addView(actionRow, columnParams(top = 10, bottom = 8))
+        actionRow.addView(managePairing, LinearLayout.LayoutParams(0, dp(48), 1f))
+        actionRow.addView(disconnect, LinearLayout.LayoutParams(0, dp(48), 1f))
+        actionsCard.addView(actionRow)
+        batterySection.addView(actionsCard, columnParams(top = 12, bottom = 8))
+        root.addView(batterySection, columnParams(bottom = 12))
     }
 
-    private fun buildNoiseSection() {
+        private fun buildNoiseSection() {
         addSection("Noise control", "Choose how much of the outside world you hear")
 
         ancGrid = LinearLayout(requireContext()).apply {
