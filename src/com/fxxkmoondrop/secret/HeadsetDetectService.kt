@@ -283,26 +283,13 @@ class HeadsetDetectService : Service() {
             val addr = GaiaBleClient.getInstance().deviceAddress ?: return
             BatteryStore.setGaiaLevel(addr, batteryId, level)
             DeviceNotif.refreshBattery(this@HeadsetDetectService) // 第 4 项：电量通知
-            // alpha2.38: battery refresh handled via ACTION_BATTERY_UPDATE broadcast
-            // alpha1.12: 左右耳电量就绪 → 弹连接窗（延迟弹窗）
-            PopupGate.flushPendingIfReady()
             // alpha1.4: 通知主界面刷新电量显示
-            try {
-                val bi = Intent("com.fxxkmoondrop.secret.STATE_UPDATED")
-                bi.setPackage("com.fxxkmoondrop.secret")
-                sendBroadcast(bi)
-            } catch (_: Exception) { }
         }
 
         override fun onAncMode(mode: Int) {
             AncBridge.notifyAncMode(mode)
             DeviceNotif.refreshAnc(this@HeadsetDetectService) // 第 5 项：ANC 通知高亮
             // alpha1.4: 通知主界面刷新降噪高亮
-            try {
-                val bi = Intent("com.fxxkmoondrop.secret.STATE_UPDATED")
-                bi.setPackage("com.fxxkmoondrop.secret")
-                sendBroadcast(bi)
-            } catch (_: Exception) { }
         }
 
         override fun onError(message: String) {
@@ -415,7 +402,6 @@ class HeadsetDetectService : Service() {
                 val idx = key.indexOf('|')
                 val addr = key.substring(0, idx)
                 val nm = key.substring(idx + 1)
-                PopupGate.tryShowConnectedDeferred(this, addr, nm)
                 hasMoondrop = true
                 // alpha2.18: 同族设备（前缀12位相同）GAIA 已连时不重复发起（双地址自我反馈防护）
                 val gaia = GaiaBleClient.getInstance()
@@ -464,13 +450,12 @@ class HeadsetDetectService : Service() {
                 }
             }
 
-            // v3.17: 断开时 force-stop Moondrop App
+            // Disconnect the GAIA link only when its matching Bluetooth device leaves.
             for (key in lastSeen) {
                 if (!now.contains(key)) {
                     val idx = key.indexOf('|')
                     val addr = key.substring(0, idx)
                     val nm = key.substring(idx + 1)
-                    PopupGate.tryShowDisconnected(this, addr, nm)
                     AppLog.w(TAG, "headset disconnected: " + nm + " " + addr)
                     // 3.2.1: 只有断开的就是我们正连的那一副时才断 GAIA ——
                     // 原本这里无条件 disconnect()，A 断开会把还连着的 B 一起掐掉。

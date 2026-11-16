@@ -1,3 +1,11 @@
+## MoonEar standalone Space Travel 2 refactor (unreleased)
+
+
+- Reworked the main device page around Space Travel 2 battery, tested ANC modes and three-level gain.
+- Replaced the old SPP-based equalizer entry with a 9ECA BLE PEQ reader and local draft preview.
+- Removed the Xposed/LSPosed, root inspection, GMS popup and system Settings injection paths.
+- Kept normal Bluetooth scanning, optional background monitoring, notifications and the Quick Settings ANC tile.
+- PEQ device-side Apply remains locked pending Space Travel 2 hardware verification of the write/commit/read-back sequence.
 ## 3.3.1 (351)
 
 > 安全与稳定性优先的一版：hook ↔ App 的通信改成 UID 鉴权，蓝牙链路改成串行队列；

@@ -103,10 +103,10 @@ class EqEditorActivity : BaseActivity() {
         }
         editorBody.addView(gainValue)
         gainSlider = Slider(this).apply {
-            valueFrom = -1200f
-            valueTo = 1200f
+            valueFrom = -32768f
+            valueTo = 32767f
             value = 0f
-            setLabelFormatter { v -> String.format(Locale.US, "%d", v.toInt()) }
+            setLabelFormatter { v -> String.format(Locale.US, "%d raw", v.toInt()) }
             addOnChangeListener { _, value, fromUser ->
                 if (!fromUser || changingSlider || selected !in draft.indices) return@addOnChangeListener
                 draft[selected].gainRaw = value.toInt()
@@ -479,8 +479,11 @@ class EqEditorActivity : BaseActivity() {
             }
             canvas.drawText("Gain raw", 2f * d, top + 4f * d, labels)
             if (points.isEmpty()) return
-            val minGain = minOf(-1200, points.minOf { it.gainRaw }).toFloat()
-            val maxGain = maxOf(1200, points.maxOf { it.gainRaw }).toFloat()
+            val low = minOf(0, points.minOf { it.gainRaw }).toFloat()
+            val high = maxOf(0, points.maxOf { it.gainRaw }).toFloat()
+            val margin = maxOf(100f, (high - low) * 0.15f)
+            val minGain = low - margin
+            val maxGain = high + margin
             val span = (maxGain - minGain).coerceAtLeast(1f)
             val sorted = points.sortedBy { it.frequencyHz }
             val path = Path()

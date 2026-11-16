@@ -11,7 +11,7 @@ import android.widget.TextView
 /**
  * 主题设置（二级页）。
  *
- * 对齐 LSPosed「主题设置」的信息层级：主题 / 强调色 / 调色规范 / 调色板风格 / 界面缩放
+ * Material 3 Expressive theme, color and display settings
  * 全部收在这一页，设置页只留一个入口 —— 避免外观分组被七八行下拉撑爆。
  */
 class ThemeSettingsActivity : BaseActivity() {
@@ -99,113 +99,6 @@ class ThemeSettingsActivity : BaseActivity() {
 
         // ── 界面：导航方式 + 界面缩放 ─────────────────────────
         body.addView(M3Ui.sectionTitle(this, pal, Lang.t("界面", "Interface")))
-        val navRow = M3Ui.dropdownRow(this, pal,
-                Lang.t("导航方式", "Navigation"),
-                null,
-                arrayOf(Lang.t("悬浮导航栏", "Floating bar"),
-                        Lang.t("抽屉菜单", "Navigation drawer")),
-                if (sp().getInt("nav_mode", 1) == 1) 0 else 1) { mi ->
-            sp().edit().putInt("nav_mode", if (mi == 0) 1 else 0).commit()
-            // 只写偏好：主页在 onResume 检测到变化后自己重建，不把用户弹回去
-        }
-        val scale = UiStyle.clampScale(sp().getFloat("ui_scale", 1f))
-        // 标题行：左侧说明这是哪一项，右侧显示当前百分比（此前只有一句「当前 100%」，没有项名）
-        val titleRow = LinearLayout(this)
-        titleRow.orientation = LinearLayout.HORIZONTAL
-        titleRow.gravity = Gravity.CENTER_VERTICAL
-        titleRow.setPadding(dp(16), dp(12), dp(16), dp(4))
-        val lbl = TextView(this)
-        lbl.text = Lang.t("界面缩放", "UI scale")
-        lbl.textSize = 16f
-        lbl.typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
-        lbl.setTextColor(pal.onSurface)
-        titleRow.addView(lbl, LinearLayout.LayoutParams(0, -2, 1f))
-        val txt = TextView(this)
-        txt.text = (scale * 100).toInt().toString() + "%"
-        txt.textSize = 14f
-        txt.setTextColor(pal.onVariant)
-        titleRow.addView(txt, LinearLayout.LayoutParams(-2, -2))
-        val slider = com.google.android.material.slider.Slider(this)
-        slider.valueFrom = 0.8f
-        slider.valueTo = 1.2f
-        slider.stepSize = 0.05f
-        slider.value = scale
-        slider.setLabelFormatter { v -> (v * 100).toInt().toString() + "%" }
-        slider.addOnChangeListener { _, v, fromUser ->
-            if (!fromUser) return@addOnChangeListener
-            sp().edit().putFloat("ui_scale", v).commit()
-            txt.text = (v * 100).toInt().toString() + "%"
-        }
-        val wrap = LinearLayout(this)
-        wrap.orientation = LinearLayout.VERTICAL
-        wrap.addView(titleRow, LinearLayout.LayoutParams(-1, -2))
-        wrap.addView(slider, LinearLayout.LayoutParams(-1, -2).also {
-            it.leftMargin = dp(12); it.rightMargin = dp(12); it.bottomMargin = dp(8)
-        })
-        body.addView(M3Ui.groupCard(this, pal, navRow, wrap), LinearLayout.LayoutParams(-1, -2))
+        val storedScale = sp().getFloat("ui_scale", 1f)
+        val scale = if (storedScale.isFinite()) storedScale.coerceIn(0.8f, 1.2f) else 1f
 
-
-    }
-
-    /** 强调色：五个官方种子色点，选一个即关闭动态取色（与 Material 轨行为一致）。 */
-    private fun buildSeedRow(): LinearLayout {
-        val row = LinearLayout(this)
-        row.orientation = LinearLayout.HORIZONTAL
-        row.gravity = Gravity.CENTER_VERTICAL
-        row.setPadding(dp(16), dp(12), dp(16), dp(12))
-        row.minimumHeight = dp(56)
-        val label = TextView(this)
-        label.text = Lang.t("强调色", "Accent")
-        label.textSize = 14f
-        label.typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
-        label.setTextColor(pal.onSurface)
-        row.addView(label, LinearLayout.LayoutParams(0, -2, 1f))
-        val cur = ThemeUtil.seed(this)
-        ThemeUtil.SEEDS.forEachIndexed { i, color ->
-            val dot = View(this)
-            val dg = GradientDrawable()
-            dg.shape = GradientDrawable.OVAL
-            dg.setColor(color)
-            if (i == cur) dg.setStroke(dp(3), pal.onSurface)
-            // 点选反馈：圆点蒙版 + 主题涟漪，与列表行一致的按下观感
-            val mask = GradientDrawable()
-            mask.shape = GradientDrawable.OVAL
-            mask.setColor(0xFFFFFFFF.toInt())
-            dot.background = android.graphics.drawable.RippleDrawable(
-                    android.content.res.ColorStateList.valueOf(
-                            (pal.onSurface and 0x00FFFFFF) or 0x33000000),
-                    dg, mask)
-            val lp = LinearLayout.LayoutParams(dp(26), dp(26))
-            lp.marginStart = dp(6)
-            dot.setOnClickListener {
-                sp().edit().putInt("seed", i).putBoolean("dynamic_color", false).commit()
-                recreate()
-            }
-            row.addView(dot, lp)
-        }
-        return row
-    }
-
-    /**
-     * 主题相关开关：改即写 SP。
-     *
-     * ⚠️ 不要立刻 [rebirth]：整页重建会当场销毁这个 MaterialSwitch，
-     * 滑块动画（约 200ms）根本没机会播完，用户只觉得「点了没有任何反应」。
-     * 所以先让开关自己的动画跑完，再用 postDelayed 重建配色。
-     */
-    private fun themeSwitch(key: String, def: Boolean, label: String,
-                            afterChange: ((Boolean) -> Unit)? = null):
-            com.google.android.material.materialswitch.MaterialSwitch {
-        val sw = com.google.android.material.materialswitch.MaterialSwitch(this)
-        sw.isChecked = sp().getBoolean(key, def)
-        sw.contentDescription = label
-        M3Ui.standardSwitch(sw, pal)
-        sw.setOnCheckedChangeListener { _, c ->
-            sp().edit().putBoolean(key, c).commit()
-            afterChange?.invoke(c)
-            body.postDelayed({ if (!isFinishing) recreate() }, 260)
-        }
-        return sw
-    }
-
-}

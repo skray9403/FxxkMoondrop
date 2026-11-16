@@ -140,7 +140,7 @@ class GaiaBleClient private constructor(
         probe,
         { readAncMap() },
         { readAncGetMap() },
-        { left, right -> sendBatteryBroadcast(left, right) },
+        { _, _ -> },
         { dcBridge }
     )
 
@@ -261,56 +261,6 @@ class GaiaBleClient private constructor(
         return if (transportAutoTried) BluetoothDevice.TRANSPORT_AUTO else BluetoothDevice.TRANSPORT_LE
     }
 
-    private fun requestRemoteScan(reason: String) {
-        val ctx = context ?: return
-        try {
-            val i = Intent(GaiaConstants.ACTION_REQ_LE_SCAN)
-            i.setPackage(GaiaConstants.PKG_GMS)
-            i.putExtra("reason", reason)
-            ctx.sendBroadcast(i)
-            Log.d(GaiaConstants.TAG, "LE scan requested -> GMS side: " + reason)
-            AppLog.i(GaiaConstants.TAG, "LE scan requested -> GMS side: " + reason)
-        } catch (t: Throwable) {
-            Log.e(GaiaConstants.TAG, "requestRemoteScan failed", t)
-        }
-    }
-
-    private var leAddrReceiver: BroadcastReceiver? = null
-    private fun registerLeAddrReceiver() {
-        val ctx = context
-        if (ctx == null || leAddrReceiver != null) return
-        try {
-            leAddrReceiver = object : BroadcastReceiver() {
-                override fun onReceive(c: Context, i: Intent) {
-                    if (i == null) return
-                    val a0 = i.getStringExtra(GaiaConstants.EXTRA_LE_ADDR) ?: return
-                    val a = a0.trim().uppercase()
-                    if (!a.matches(Regex("[0-9A-F]{2}(:[0-9A-F]{2}){5}"))) {
-                        Log.w(GaiaConstants.TAG, "bad LE addr from broadcast: " + a)
-                        return
-                    }
-                    Log.d(GaiaConstants.TAG, "LE addr from FastPairHook: " + a)
-                    // alpha2.41.9: 广播来源只作内存候选，等 GAIA/9ECA 服务确认后才持久化
-                    cachedLeAddress = a
-                    invalidLeAddrs.remove(a)
-                    if (!connected) {
-                        candidates = arrayOf(a)
-                        candidateIdx = 0
-                        attemptCount = 0
-                        connect(context!!, a)
-                    } else if (!a.equals(deviceAddress, ignoreCase = true)) {
-                        Log.d(GaiaConstants.TAG, "le addr changed while connected: " + a + " (kept current)")
-                    }
-                }
-            }
-            val f = IntentFilter(GaiaConstants.ACTION_LE_ADDR_FOUND)
-            HookIpc.registerInternal(ctx, leAddrReceiver, f)
-            Log.d(GaiaConstants.TAG, "le addr receiver registered")
-        } catch (t: Throwable) {
-            Log.e(GaiaConstants.TAG, "registerLeAddrReceiver failed", t)
-        }
-    }
-
     /**
      * 是否处于「连上」状态。
      *
@@ -399,7 +349,6 @@ class GaiaBleClient private constructor(
         AppLog.i(GaiaConstants.TAG, "connect() addr=" + address + " cachedLe=" + cachedLeAddress)
         simConnected = false
         if (context == null) context = ctx.applicationContext
-        registerLeAddrReceiver()
         if (cachedLeAddress == null && context != null) {
             try {
                 val fd = context!!.filesDir
@@ -713,7 +662,6 @@ class GaiaBleClient private constructor(
     private fun connectFromScanHits() {
         if (scanHits.isEmpty()) {
             retryConnect()
-            requestRemoteScan("scan-miss")
             return
         }
         val sorted = ArrayList(scanHits)
@@ -1049,10 +997,6 @@ class GaiaBleClient private constructor(
     fun disconnect() {
         val addr = deviceAddress
         stopScan()
-        leAddrReceiver?.let { receiver ->
-            try { context?.unregisterReceiver(receiver) } catch (_: Exception) { }
-        }
-        leAddrReceiver = null
         disconnectInternal()
         deviceAddress = null
         callback?.onDisconnected(addr ?: "")
@@ -1223,7 +1167,7 @@ class GaiaBleClient private constructor(
         postSessionDelayed({
             if (connected) {
                 fetchBatteryLevels()
-                try { AncBridge.fetchAncMode(); AncBridge.sendAncStatus(probe.status()) } catch (_: Exception) { }
+                try { AncBridge.fetchAncMode() } catch (_: Exception) { }
                 try { DeviceControlBridge.fetchAll() } catch (_: Exception) { }
             }
         }, 1200)
@@ -1494,20 +1438,6 @@ class GaiaBleClient private constructor(
         enqueueWrite(g, ch, frame)
     }
 
-    /** alpha2.27: broadcast battery update to GMS process */
-    private fun sendBatteryBroadcast(left: Int, right: Int) {
-        val addr = deviceAddress
-        val actualLeft = if (left >= 0) left else BatteryStore.getGaiaLeft(addr)
-        val actualRight = if (right >= 0) right else BatteryStore.getGaiaRight(addr)
-        try {
-            val ctx = context ?: return
-            val i = android.content.Intent("com.fxxkmoondrop.secret.ACTION_BATTERY_UPDATE")
-            i.putExtra("left", actualLeft)
-            i.putExtra("right", actualRight)
-            ctx.sendBroadcast(i)
-            Log.d(GaiaConstants.TAG, "battery broadcast: l=" + actualLeft + " r=" + actualRight)
-        } catch (_: Throwable) { }
-    }
 
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {

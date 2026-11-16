@@ -197,7 +197,7 @@ object DeviceNotif {
             }
         }
 
-        // 颜色统一走 M3 动态取色（与 App 内面板同一套 token，见 ControlPanel.refreshDcCard）
+        // 颜色统一走 M3 动态取色（与 App 内面板同一套主题 token）
         val dark = ThemeUtil.isDark(c)
         // 与 ThemeUtil.Palette 的 M3 角色取值保持一致：
         //  - onContainer 此前 fallback 误写成 container 的值（深色下 onContainer==container，

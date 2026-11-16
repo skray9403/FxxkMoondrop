@@ -1,110 +1,45 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- FxxkMoondrop M3 构建链文本 manifest（由二进制 AXML 完整转写） -->
-<!-- 版本号以 app/build.gradle.kts 的 defaultConfig 为准（AGP 合并时覆盖此处）；
-     这两个属性此前停留在旧链的 alpha2.27 / 254，3.0.4 起同步为正式版本号，避免仓库里残留 alpha 字样。 -->
-<!-- 3.2.9 清理两处死声明：
-     - 移除 package 属性：AGP 8 起该属性被忽略并告警（改用 build.gradle.kts 的 namespace），
-       两者值同为 com.fxxkmoondrop.secret，删除不改变任何行为。
-     - 移除 .PopupActivity 声明：该类在源码中不存在、全仓零引用、无 intent-filter、
-       exported=false，永远不会被启动。 -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    android:versionCode="351"
-    android:versionName="3.3.1">
-
-    <!-- 3.2.13: 移除 <uses-sdk>。AGP 9 起禁止在 manifest 里控制 SDK 版本
-         （minSdk/targetSdk），会直接让 manifest merger 失败。
-         权威源是 app/build.gradle.kts 的 defaultConfig（minSdk 26 / targetSdk 36），
-         两者本就一致，删除不改变任何行为。 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
         android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.BLUETOOTH" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- 不声明 FOREGROUND_SERVICE / FOREGROUND_SERVICE_CONNECTED_DEVICE：
-         HeadsetDetectService 从不调用 startForeground()，实为普通后台服务
-         （连接广播 + START_STICKY + 非唤醒 AlarmManager 兜底），该权限无任何作用。 -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    <!-- 3.0.5: 无 Root 保活 —— 用系统弹窗申请电池优化白名单（旧实现只能用 root 的 deviceidle 命令） -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
-    <!-- 3.2.11: 联网检查更新（GitHub 公开 releases 接口）。不发送任何设备信息、不收集数据 -->
     <uses-permission android:name="android.permission.INTERNET" />
-    <!-- 不再声明 SYSTEM_ALERT_WINDOW：本模块从不创建悬浮窗，
-         弹窗走的是 GMS 进程内的既有窗口（受 GMS 自身权限约束），与本应用无关。 -->
 
-    <!-- Only this module's signer may send commands/state to the injected GMS receivers. -->
-    <permission android:name="com.fxxkmoondrop.secret.permission.HOOK_IPC"
-        android:protectionLevel="signature" />
-    <uses-permission android:name="com.fxxkmoondrop.secret.permission.HOOK_IPC" />
-
-    <!-- Provider authentication must resolve the installed host UIDs on target 30+. -->
-    <queries>
-        <package android:name="com.google.android.gms" />
-        <package android:name="com.android.settings" />
-    </queries>
-
-    <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
+    <uses-feature
+        android:name="android.hardware.bluetooth_le"
+        android:required="true" />
 
     <application
-        android:label="MoonEar"
-        android:description="@string/module_description"
+        android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
-        android:theme="@style/Theme.FxxkMoondrop"
-        android:allowBackup="false">
+        android:label="MoonEar"
+        android:theme="@style/Theme.FxxkMoondrop">
 
-        <activity android:name=".PermissionActivity" android:exported="false" />
-        <!-- 均衡器正式入口：经典蓝牙 SPP（0A05 读 / 0A06 写），5 段参数均衡可视化编辑 -->
-        <activity android:name=".EqEditorActivity" android:exported="false" />
-        <activity android:name=".ThemeSettingsActivity" android:exported="false" />
-        <!-- 调试日志：仅当设置里打开「调试模式」时可用 -->
-        <activity android:name=".DebugLogActivity" android:exported="false" />
-
-
-        <activity android:name=".MainActivity" android:exported="true">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
 
-        <!-- 3.1.0: 首次启动的使用引导（设置页最底部也能重看） -->
-        <activity android:name=".OnboardingActivity" android:exported="false" />
-
-        <!-- alpha2.26.5: 跨进程配置读取（GMS FastPair 弹窗进程查模块设置） -->
-        <provider
-            android:name=".PrefsProvider"
-            android:authorities="com.fxxkmoondrop.secret.prefs"
-            android:exported="true" />
+        <activity
+            android:name=".EqEditorActivity"
+            android:exported="false" />
+        <activity
+            android:name=".ThemeSettingsActivity"
+            android:exported="false" />
 
         <service
             android:name=".HeadsetDetectService"
             android:exported="false" />
-
-        <!-- 3.2.12: 快捷设置磁贴 —— 下拉面板一键切降噪档位。
-             exported 必须为 true（否则系统绑不上），但权限限定为
-             BIND_QUICK_SETTINGS_TILE：只有持有该权限的系统服务能绑定，
-             第三方应用绑不了。不涉及 SYSTEM_ALERT_WINDOW 或悬浮窗。 -->
-        <activity
-            android:name=".EqSppActivity"
-            android:exported="false" />
-
-        <activity
-            android:name=".ServiceProbeActivity"
-            android:exported="false" />
-
-        <activity
-            android:name=".ConnectLogActivity"
-            android:exported="false" />
-
-        <activity
-            android:name=".ManualConnectActivity"
-            android:exported="false" />
-
-        <provider
-            android:name=".HearableSliceProvider"
-            android:authorities="com.fxxkmoondrop.secret.slices"
-            android:exported="true"
-            android:grantUriPermissions="true" />
 
         <service
             android:name=".AncTileService"
@@ -117,11 +52,12 @@
             </intent-filter>
         </service>
 
-        <receiver android:name=".BootReceiver" android:exported="true">
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
-                <!-- These Bluetooth actions are exempt from implicit-broadcast restrictions. -->
                 <action android:name="android.bluetooth.device.action.ACL_CONNECTED" />
                 <action android:name="android.bluetooth.a2dp.profile.action.CONNECTION_STATE_CHANGED" />
                 <action android:name="android.bluetooth.headset.profile.action.CONNECTION_STATE_CHANGED" />
@@ -129,9 +65,11 @@
             </intent-filter>
         </receiver>
 
-        <receiver android:name=".AliveReceiver" android:exported="false" />
-
-        <!-- 第 5 项：通知栏 ANC 档位按钮 -->
-        <receiver android:name=".NotifActionReceiver" android:exported="false" />
+        <receiver
+            android:name=".AliveReceiver"
+            android:exported="false" />
+        <receiver
+            android:name=".NotifActionReceiver"
+            android:exported="false" />
     </application>
 </manifest>

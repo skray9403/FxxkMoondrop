@@ -34,13 +34,13 @@ object UpdateChecker {
 
     private const val TAG = "UpdateChecker"
 
-    private const val REPO = "https://github.com/bqj6666/FxxkMoondrop"
-    private const val API_LATEST = "https://api.github.com/repos/bqj6666/FxxkMoondrop/releases/latest"
-    private const val API_LIST = "https://api.github.com/repos/bqj6666/FxxkMoondrop/releases?per_page=30"
-    private const val ATOM = "https://github.com/bqj6666/FxxkMoondrop/releases.atom"
+    private const val REPO = "https://github.com/skray9403/FxxkMoondrop"
+    private const val API_LATEST = "https://api.github.com/repos/skray9403/FxxkMoondrop/releases/latest"
+    private const val API_LIST = "https://api.github.com/repos/skray9403/FxxkMoondrop/releases?per_page=30"
+    private const val ATOM = "https://github.com/skray9403/FxxkMoondrop/releases.atom"
     /** 按 tag 精确取某一次发布（「更新日志」要的是当前已安装版本，不是最新版）。 */
     private const val API_TAG =
-            "https://api.github.com/repos/bqj6666/FxxkMoondrop/releases/tags/"
+            "https://api.github.com/repos/skray9403/FxxkMoondrop/releases/tags/"
 
     private const val ASSET = "app-release.apk"
 
@@ -513,7 +513,7 @@ object UpdateChecker {
                 readTimeout = READ_TIMEOUT_MS
                 // 不带 token、不带 cookie、不发送任何设备信息（设计文档 §8）
                 setRequestProperty("Accept", "application/vnd.github+json, application/atom+xml")
-                setRequestProperty("User-Agent", "FxxkMoondrop")
+                setRequestProperty("User-Agent", "MoonEar")
                 instanceFollowRedirects = true
             }
             val code = conn.responseCode

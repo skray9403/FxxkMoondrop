@@ -13,5 +13,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "FxxkMoondrop"
+rootProject.name = "MoonEar"
 include(":app")
