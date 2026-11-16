@@ -864,10 +864,10 @@ class OverviewFragment : Fragment() {
             set(value) { field = value; invalidate() }
 
         private var level = -1
-        private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val outline = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
-            strokeCap = Paint.Cap.ROUND
-            strokeWidth = 7f * resources.displayMetrics.density
+            strokeWidth = 1.25f * resources.displayMetrics.density
         }
         private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             textAlign = Paint.Align.CENTER
@@ -887,25 +887,45 @@ class OverviewFragment : Fragment() {
             super.onDraw(canvas)
             val d = resources.displayMetrics.density
             val cx = width / 2f
-            val cy = 39f * d
-            val radius = 27f * d
-            ring.color = palette.outline
-            val bounds = RectF(cx - radius, cy - radius, cx + radius, cy + radius)
-            canvas.drawArc(bounds, -90f, 360f, false, ring)
-            if (level >= 0) {
-                ring.color = palette.primary
-                canvas.drawArc(bounds, -90f, 360f * level / 100f, false, ring)
+            val cy = 30f * d
+            val radius = 26f * d
+
+            // Soft circular product thumbnail, inspired by the Pixel Buds device-detail row.
+            fill.color = palette.secondaryContainer
+            canvas.drawCircle(cx, cy, radius, fill)
+            outline.color = palette.cardStroke
+            canvas.drawCircle(cx, cy, radius, outline)
+
+            fill.color = palette.onSecondaryContainer
+            if (label.equals("Case", ignoreCase = true)) {
+                val body = RectF(cx - 17f * d, cy - 8f * d, cx + 17f * d, cy + 13f * d)
+                canvas.drawRoundRect(body, 6f * d, 6f * d, fill)
+                val lid = RectF(cx - 17f * d, cy - 12f * d, cx + 17f * d, cy - 4f * d)
+                canvas.drawRoundRect(lid, 5f * d, 5f * d, fill)
+                fill.color = palette.primary
+                canvas.drawCircle(cx, cy + 5f * d, 1.8f * d, fill)
+            } else {
+                canvas.save()
+                val tilt = if (label.equals("Left", true)) -10f else 10f
+                canvas.rotate(tilt, cx, cy)
+                canvas.drawRoundRect(
+                    RectF(cx - 5f * d, cy - 2f * d, cx + 5f * d, cy + 20f * d),
+                    4.5f * d, 4.5f * d, fill
+                )
+                canvas.drawCircle(cx, cy - 4f * d, 10f * d, fill)
+                canvas.restore()
             }
+
             text.color = palette.onSurface
-            text.textSize = 15f * d
-            canvas.drawText(if (level >= 0) "$level%" else "—", cx, cy + 5f * d, text)
+            text.textSize = 14f * d
+            canvas.drawText(if (level >= 0) "$level%" else "—", cx, 76f * d, text)
             small.color = palette.onVariant
             small.textSize = 12f * d
-            canvas.drawText(label, cx, 91f * d, small)
+            canvas.drawText(label, cx, 98f * d, small)
         }
     }
 
-    companion object {
+        companion object {
         private const val REQUEST_BLUETOOTH = 0x4D42
     }
 }
