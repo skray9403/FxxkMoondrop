@@ -443,7 +443,7 @@ class MainActivity : BaseFragmentActivity() {
     private fun openUpdatePage() {
         runCatching {
             startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW,
-                    android.net.Uri.parse("https://github.com/bqj6666/FxxkMoondrop/releases")))
+                    android.net.Uri.parse("https://github.com/skray9403/FxxkMoondrop/releases")))
         }
     }
 
