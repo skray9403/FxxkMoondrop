@@ -57,7 +57,7 @@ class OverviewFragment : Fragment() {
             handler.post {
                 if (isAdded && ::status.isInitialized) {
                     status.text = message
-                    status.setTextColor(pal.error)
+                    status.setTextColor(pal.red)
                 }
             }
         }
@@ -77,7 +77,7 @@ class OverviewFragment : Fragment() {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(pal.surface)
         }
-        scroller.addView(root, ScrollView.LayoutParams(-1, -2))
+        scroller.addView(root, ViewGroup.LayoutParams(-1, -2))
 
         deviceName = TextView(requireContext()).apply {
             text = "Space Travel 2"
@@ -96,7 +96,7 @@ class OverviewFragment : Fragment() {
         addSection(Lang.t("电量", "Battery"))
         val batteryCard = MaterialCardView(requireContext()).apply {
             radius = dp(28).toFloat()
-            cardBackgroundColor = pal.card
+            setCardBackgroundColor(pal.card)
             strokeWidth = 0
             cardElevation = 0f
             setContentPadding(dp(8), dp(16), dp(8), dp(16))

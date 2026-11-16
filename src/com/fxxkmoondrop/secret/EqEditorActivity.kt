@@ -416,12 +416,12 @@ class EqEditorActivity : BaseActivity() {
 
     private fun showStatus(message: String, error: Boolean = false) {
         status.text = message
-        status.setTextColor(if (error) pal.error else pal.onVariant)
+        status.setTextColor(if (error) pal.red else pal.onVariant)
     }
 
     private fun card(): MaterialCardView = MaterialCardView(this).apply {
         radius = dp(28).toFloat()
-        cardBackgroundColor = pal.card
+        setCardBackgroundColor(pal.card)
         strokeWidth = 0
         cardElevation = 0f
         setContentPadding(dp(10), dp(10), dp(10), dp(10))

@@ -125,7 +125,6 @@ class CapabilityProbe(
             handler.postDelayed({ synchronized(lock) {
                 if (!probeDone && featurePageTimeout == null) {
                     probeDone = true
-                    try { AncBridge.sendAncStatus(status()) } catch (_: Exception) { }
                 }
             } }, PROBE_TIMEOUT_MS)
             return
@@ -185,7 +184,6 @@ class CapabilityProbe(
                         AppLog.w(TAG, "probe timeout: basicAlive=" + basicAlive +
                                 " features=" + features.sorted().joinToString(",") +
                                 " -> ancPath=" + ancPath)
-                        try { AncBridge.sendAncStatus(status()) } catch (_: Exception) { }
                     }
                 } }, PROBE_TIMEOUT_MS)
             }
@@ -231,7 +229,6 @@ class CapabilityProbe(
         featurePageTimeout = null
         probeTruncated = incomplete
         probeDone = true
-        try { AncBridge.sendAncStatus(status()) } catch (_: Exception) { }
         AppLog.d(TAG, "probe: pages=$featurePages truncated=$incomplete ancPath=$ancPath features=${features.sorted()}")
     }
 
@@ -259,7 +256,6 @@ class CapabilityProbe(
             onFeatureResponseSeen(feature)  // alpha2.41.4: 响应驱动标记
             acProbeActive = false
             probeDone = featurePageTimeout == null
-            try { AncBridge.sendAncStatus(status()) } catch (_: Exception) { }
         }
         return probeOk
     }

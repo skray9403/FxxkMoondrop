@@ -28,7 +28,7 @@ class SettingsFragment : Fragment() {
             setPadding(dp(16), dp(14), dp(16), dp(28))
         }
         val body = LinearLayout(requireContext()).apply { orientation = LinearLayout.VERTICAL }
-        scroll.addView(body, ScrollView.LayoutParams(-1, -2))
+        scroll.addView(body, ViewGroup.LayoutParams(-1, -2))
 
         body.addView(TextView(requireContext()).apply {
             text = Lang.t("设置", "Settings")
@@ -130,7 +130,7 @@ class SettingsFragment : Fragment() {
 
     private fun card() = MaterialCardView(requireContext()).apply {
         radius = dp(26).toFloat()
-        cardBackgroundColor = pal.card
+        setCardBackgroundColor(pal.card)
         strokeWidth = 0
         cardElevation = 0f
     }
@@ -191,7 +191,7 @@ class SettingsFragment : Fragment() {
         })
         row.addView(text, LinearLayout.LayoutParams(0, -2, 1f))
         row.addView(TextView(requireContext()).apply {
-            text = "›"
+            this.text = "›"
             textSize = 26f
             setTextColor(pal.onVariant)
         })

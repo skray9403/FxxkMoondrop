@@ -26,7 +26,7 @@ class AboutFragment : Fragment() {
         val body = LinearLayout(requireContext()).apply {
             orientation = LinearLayout.VERTICAL
         }
-        scroll.addView(body, ScrollView.LayoutParams(-1, -2))
+        scroll.addView(body, ViewGroup.LayoutParams(-1, -2))
         body.addView(TextView(requireContext()).apply {
             text = "MoonEar"
             textSize = 30f
@@ -41,7 +41,7 @@ class AboutFragment : Fragment() {
         })
         val card = MaterialCardView(requireContext()).apply {
             radius = dp(26).toFloat()
-            cardBackgroundColor = pal.card
+            setCardBackgroundColor(pal.card)
             strokeWidth = 0
             cardElevation = 0f
             setContentPadding(dp(16), dp(16), dp(16), dp(16))

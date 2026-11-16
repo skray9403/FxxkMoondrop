@@ -18,17 +18,7 @@ class HeadsetReceiver : BroadcastReceiver() {
 
         val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
         val name = device?.name ?: intent.getStringExtra(BluetoothDevice.EXTRA_NAME)
-        val address = device?.address ?: intent.getStringExtra(BluetoothDevice.EXTRA_ADDRESS)
-
-        if (action == BluetoothDevice.ACTION_BATTERY_LEVEL_CHANGED) {
-            val level = intent.getIntExtra(BluetoothDevice.EXTRA_BATTERY_LEVEL, -1)
-            if (address != null && level in 0..100) {
-                BatteryStore.set(address, level)
-                DeviceNotif.refreshBattery(context)
-                Log.d(TAG, "system battery update for $name: $level%")
-            }
-            return
-        }
+        val address = device?.address
 
         val connected: Boolean
         val disconnected: Boolean
