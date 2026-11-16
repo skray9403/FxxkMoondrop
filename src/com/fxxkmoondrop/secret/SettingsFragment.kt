@@ -13,118 +13,119 @@ import androidx.fragment.app.Fragment
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.materialswitch.MaterialSwitch
 
-/** Settings that remain meaningful for the standalone Space Travel 2 companion. */
+/**
+ * Minimal settings for the standalone MoonEar companion.
+ *
+ * Legacy module, injection, popup, simulation and diagnostic controls do not
+ * belong in this app and are intentionally not exposed here.
+ */
 class SettingsFragment : Fragment() {
     private lateinit var pal: ThemeUtil.Palette
-    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+    private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
-    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, state: Bundle?): View {
+    override fun onCreateView(
+        inflater: LayoutInflater,
+        container: ViewGroup?,
+        state: Bundle?
+    ): View {
         Lang.refresh(requireContext())
         pal = ThemeUtil.Palette(requireContext())
-        val sp = requireContext().getSharedPreferences("cfg", 0)
+        val prefs = requireContext().getSharedPreferences("cfg", 0)
+
         val scroll = ScrollView(requireContext()).apply {
             setBackgroundColor(pal.surface)
             clipToPadding = false
-            setPadding(dp(16), dp(14), dp(16), dp(28))
+            setPadding(dp(20), dp(18), dp(20), dp(32))
         }
-        val body = LinearLayout(requireContext()).apply { orientation = LinearLayout.VERTICAL }
-        scroll.addView(body, ViewGroup.LayoutParams(-1, -2))
+        val content = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        scroll.addView(content, ViewGroup.LayoutParams(-1, -2))
 
-        body.addView(TextView(requireContext()).apply {
-            text = Lang.t("设置", "Settings")
-            textSize = 30f
+        content.addView(TextView(requireContext()).apply {
+            text = "Settings"
+            textSize = 32f
             typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
             setTextColor(pal.onSurface)
         })
-        body.addView(TextView(requireContext()).apply {
-            text = "Space Travel 2"
+        content.addView(TextView(requireContext()).apply {
+            text = "Make MoonEar work the way you prefer."
             textSize = 14f
             setTextColor(pal.onVariant)
-        }, LinearLayout.LayoutParams(-1, -2).also { it.bottomMargin = dp(18) })
-
-        section(body, Lang.t("外观", "Appearance"))
-        body.addView(rowCard(
-            Lang.t("主题与颜色", "Theme and colors"),
-            Lang.t("Material 3 Expressive、动态取色和深浅色模式",
-                "Material 3 Expressive, dynamic color and light/dark mode")
-        ) {
-            startActivity(Intent(requireContext(), ThemeSettingsActivity::class.java))
+        }, LinearLayout.LayoutParams(-1, -2).also {
+            it.topMargin = dp(4)
+            it.bottomMargin = dp(12)
         })
 
-        section(body, Lang.t("通知", "Notifications"))
-        body.addView(toggleCard(
-            Lang.t("电量通知", "Battery notifications"),
-            Lang.t("显示左右耳电量（耳机上报时）", "Show left and right earbud charge when available"),
-            sp.getBoolean("feat_notif_battery", true)
-        ) { enabled ->
-            sp.edit().putBoolean("feat_notif_battery", enabled).apply()
-            DeviceNotif.refreshBattery(requireContext())
-        })
-        body.addView(toggleCard(
-            Lang.t("降噪控制通知", "Noise-control notification"),
-            Lang.t("在通知中显示支持的降噪模式", "Show the supported noise-control modes in the notification"),
-            sp.getBoolean("feat_notif_anc", true)
-        ) { enabled ->
-            sp.edit().putBoolean("feat_notif_anc", enabled).apply()
-            DeviceNotif.refreshAnc(requireContext())
-        })
-
-        section(body, Lang.t("后台", "Background"))
-        body.addView(toggleCard(
-            Lang.t("后台监听", "Background monitoring"),
-            Lang.t("耳机使用时自动重连并刷新电量", "Reconnect and refresh battery while the earbuds are in use"),
-            KeepAlive.enabled(requireContext())
-        ) { enabled ->
-            KeepAlive.setEnabled(requireContext(), enabled)
-        })
-
-        section(body, Lang.t("语言", "Language"))
-        val languageValue = TextView(requireContext()).apply {
-            text = when (Lang.mode(requireContext())) {
-                1 -> "中文"
-                2 -> "English"
-                else -> Lang.t("跟随系统", "System default")
+        section(content, "Appearance")
+        content.addView(
+            navigationCard(
+                "Theme and colours",
+                "Dynamic colour, light and dark appearance"
+            ) {
+                startActivity(Intent(requireContext(), ThemeSettingsActivity::class.java))
             }
-            textSize = 14f
-            setTextColor(pal.onVariant)
-            setPadding(dp(16), dp(14), dp(16), dp(14))
-            isClickable = true
-            isFocusable = true
-            setOnClickListener {
-                val labels = arrayOf(Lang.t("跟随系统", "System default"), "中文", "English")
-                com.google.android.material.dialog.MaterialAlertDialogBuilder(requireContext())
-                    .setTitle(Lang.t("应用语言", "App language"))
-                    .setItems(labels) { _, which ->
-                        sp.edit().putInt("lang", which).apply()
-                        Lang.refresh(requireContext())
-                        activity?.recreate()
-                    }.show()
-            }
-        }
-        val languageCard = card().apply { addView(languageValue) }
-        body.addView(languageCard)
+        )
 
-        section(body, Lang.t("关于", "About"))
-        body.addView(rowCard(
-            "MoonEar",
-            Lang.t("面向 Moondrop Space Travel 2 的独立蓝牙伴侣应用。",
-                "A standalone Bluetooth companion for Moondrop Space Travel 2.")
-        ) {
-            runCatching {
-                startActivity(Intent(Intent.ACTION_VIEW,
-                    android.net.Uri.parse("https://github.com/skray9403/FxxkMoondrop")))
+        section(content, "Notifications")
+        content.addView(
+            toggleCard(
+                "Battery notifications",
+                "Show left and right earbud battery levels when available",
+                prefs.getBoolean("feat_notif_battery", true)
+            ) { enabled ->
+                prefs.edit().putBoolean("feat_notif_battery", enabled).apply()
+                DeviceNotif.refreshBattery(requireContext())
             }
-        })
+        )
+        content.addView(
+            toggleCard(
+                "Noise-control notification",
+                "Show ANC and transparency controls in the notification",
+                prefs.getBoolean("feat_notif_anc", true)
+            ) { enabled ->
+                prefs.edit().putBoolean("feat_notif_anc", enabled).apply()
+                DeviceNotif.refreshAnc(requireContext())
+            }
+        )
+
+        section(content, "Background")
+        content.addView(
+            toggleCard(
+                "Background monitoring",
+                "Reconnect and refresh battery while the earbuds are in use",
+                KeepAlive.enabled(requireContext())
+            ) { enabled ->
+                KeepAlive.setEnabled(requireContext(), enabled)
+            }
+        )
+
+        section(content, "About")
+        content.addView(
+            navigationCard(
+                "MoonEar",
+                "A dedicated companion for Moondrop Space Travel 2"
+            ) {
+                runCatching {
+                    startActivity(
+                        Intent(
+                            Intent.ACTION_VIEW,
+                            android.net.Uri.parse("https://github.com/skray9403/FxxkMoondrop")
+                        )
+                    )
+                }
+            }
+        )
         return scroll
     }
 
-    private fun section(body: LinearLayout, title: String) {
-        body.addView(TextView(requireContext()).apply {
+    private fun section(parent: LinearLayout, title: String) {
+        parent.addView(TextView(requireContext()).apply {
             text = title
             textSize = 14f
             setTextColor(pal.onVariant)
             typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
-            setPadding(0, dp(20), 0, dp(10))
+            setPadding(dp(2), dp(22), dp(2), dp(10))
         })
     }
 
@@ -133,65 +134,78 @@ class SettingsFragment : Fragment() {
         setCardBackgroundColor(pal.card)
         strokeWidth = 0
         cardElevation = 0f
+        isClickable = true
+        isFocusable = true
     }
 
-    private fun toggleCard(title: String, summary: String, checked: Boolean,
-                           changed: (Boolean) -> Unit): MaterialCardView {
+    private fun toggleCard(
+        title: String,
+        summary: String,
+        checked: Boolean,
+        changed: (Boolean) -> Unit
+    ): MaterialCardView {
         val card = card()
         val row = LinearLayout(requireContext()).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(16), dp(14), dp(12), dp(14))
+            setPadding(dp(18), dp(17), dp(14), dp(17))
         }
-        val text = LinearLayout(requireContext()).apply { orientation = LinearLayout.VERTICAL }
-        text.addView(TextView(requireContext()).apply {
-            this.text = title
+        val copy = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        copy.addView(TextView(requireContext()).apply {
+            text = title
             textSize = 16f
             setTextColor(pal.onSurface)
             typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
         })
-        text.addView(TextView(requireContext()).apply {
-            this.text = summary
+        copy.addView(TextView(requireContext()).apply {
+            text = summary
             textSize = 12f
             setTextColor(pal.onVariant)
-            setPadding(0, dp(4), 0, 0)
+            setPadding(0, dp(5), 0, 0)
         })
-        row.addView(text, LinearLayout.LayoutParams(0, -2, 1f))
+        row.addView(copy, LinearLayout.LayoutParams(0, -2, 1f))
         row.addView(MaterialSwitch(requireContext()).apply {
             isChecked = checked
             setOnCheckedChangeListener { _, value -> changed(value) }
         })
         card.addView(row)
+        card.setOnClickListener {
+            // Leave switch interaction to the switch itself.
+        }
         return card
     }
 
-    private fun rowCard(title: String, summary: String, action: () -> Unit): MaterialCardView {
-        val card = card().apply {
-            isClickable = true
-            isFocusable = true
-            setOnClickListener { action() }
-        }
+    private fun navigationCard(
+        title: String,
+        summary: String,
+        action: () -> Unit
+    ): MaterialCardView {
+        val card = card().apply { setOnClickListener { action() } }
         val row = LinearLayout(requireContext()).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(16), dp(16), dp(16), dp(16))
+            setPadding(dp(18), dp(18), dp(18), dp(18))
         }
-        val text = LinearLayout(requireContext()).apply { orientation = LinearLayout.VERTICAL }
-        text.addView(TextView(requireContext()).apply {
-            this.text = title
+        val copy = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        copy.addView(TextView(requireContext()).apply {
+            text = title
             textSize = 16f
             setTextColor(pal.onSurface)
             typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
         })
-        text.addView(TextView(requireContext()).apply {
-            this.text = summary
+        copy.addView(TextView(requireContext()).apply {
+            text = summary
             textSize = 12f
             setTextColor(pal.onVariant)
-            setPadding(0, dp(4), 0, 0)
+            setPadding(0, dp(5), 0, 0)
         })
-        row.addView(text, LinearLayout.LayoutParams(0, -2, 1f))
+        row.addView(copy, LinearLayout.LayoutParams(0, -2, 1f))
         row.addView(TextView(requireContext()).apply {
-            this.text = "›"
+            text = "›"
             textSize = 26f
             setTextColor(pal.onVariant)
         })
