@@ -63,7 +63,7 @@ class AboutFragment : Fragment() {
         })
         val link = MaterialCardView(requireContext()).apply {
             radius = dp(22).toFloat()
-            cardBackgroundColor = pal.card
+            setCardBackgroundColor(pal.card)
             strokeWidth = 0
             cardElevation = 0f
             isClickable = true
