@@ -110,14 +110,14 @@ class UpdateCheckerTest {
     @Test
     fun `下载链接按 tag 直接构造`() {
         assertEquals(
-                "https://github.com/bqj6666/FxxkMoondrop/releases/download/330-3.2.10/app-release.apk",
+                "https://github.com/skray9403/FxxkMoondrop/releases/download/330-3.2.10/app-release.apk",
                 UpdateChecker.downloadUrl("330-3.2.10"))
     }
 
     @Test
     fun `预发布 tag 同样能构造下载链接`() {
         assertEquals(
-                "https://github.com/bqj6666/FxxkMoondrop/releases/download/ci-199/app-release.apk",
+                "https://github.com/skray9403/FxxkMoondrop/releases/download/ci-199/app-release.apk",
                 UpdateChecker.downloadUrl("ci-199"))
     }
 
@@ -128,13 +128,13 @@ class UpdateCheckerTest {
           <entry>
             <title>FxxkMoondrop CI build</title>
             <id>tag:github.com,2008:Repository/1339943709/ci-199</id>
-            <link rel="alternate" type="text/html" href="https://github.com/bqj6666/FxxkMoondrop/releases/tag/ci-199"/>
+            <link rel="alternate" type="text/html" href="https://github.com/skray9403/FxxkMoondrop/releases/tag/ci-199"/>
             <content type="html">&lt;code&gt;a1750e0dc9381ae64aded5766c41418335059c30&lt;/code&gt;</content>
           </entry>
           <entry>
             <title>FxxkMoondrop 330-3.2.10</title>
             <id>tag:github.com,2008:Repository/1339943709/330-3.2.10</id>
-            <link rel="alternate" type="text/html" href="https://github.com/bqj6666/FxxkMoondrop/releases/tag/330-3.2.10"/>
+            <link rel="alternate" type="text/html" href="https://github.com/skray9403/FxxkMoondrop/releases/tag/330-3.2.10"/>
             <content type="html">&lt;h2&gt;更新日志&lt;/h2&gt;</content>
           </entry>
         </feed>

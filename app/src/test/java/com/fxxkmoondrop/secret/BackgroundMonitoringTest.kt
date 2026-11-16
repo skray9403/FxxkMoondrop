@@ -153,11 +153,14 @@ class BackgroundMonitoringTest {
     }
 
     @Test
-    fun `ACL connections require a Moondrop name and never use generic probing`() {
-        assertTrue(BootReceiver.acceptsConnection(BluetoothDevice.ACTION_ACL_CONNECTED, -1, "MOONDROP"))
+    fun `only Space Travel 2 is eligible for background discovery`() {
+        assertTrue(BootReceiver.acceptsConnection(BluetoothDevice.ACTION_ACL_CONNECTED, -1, "SPACE TRAVEL 2"))
+        assertTrue(BootReceiver.acceptsConnection(BluetoothDevice.ACTION_ACL_CONNECTED, -1, "太空漫游2"))
+        assertFalse(BootReceiver.acceptsConnection(BluetoothDevice.ACTION_ACL_CONNECTED, -1, "MOONDROP"))
+        assertFalse(BootReceiver.acceptsConnection(BluetoothDevice.ACTION_ACL_CONNECTED, -1, "GOLDEN AGES 2"))
         assertFalse(BootReceiver.acceptsConnection(BluetoothDevice.ACTION_ACL_CONNECTED, -1, "Uncatalogued audio model"))
         assertFalse(BootReceiver.acceptsConnection(BluetoothDevice.ACTION_ACL_CONNECTED, -1, null))
-        assertTrue(BootReceiver.acceptsConnection(BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED,
+        assertFalse(BootReceiver.acceptsConnection(BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED,
             BluetoothProfile.STATE_CONNECTED, "Uncatalogued audio model"))
     }
 
@@ -187,10 +190,10 @@ class BackgroundMonitoringTest {
     }
 
     @Test
-    fun `unknown audio models remain eligible for protocol probing`() {
+    fun `unknown audio models are not eligible for protocol probing`() {
         BootReceiver().onReceive(context, Event(BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED,
             BluetoothProfile.STATE_CONNECTED, deviceName = "Uncatalogued audio model"))
-        assertEquals(1, context.starts)
+        assertEquals(0, context.starts)
     }
 
     @Test
@@ -229,7 +232,7 @@ class BackgroundMonitoringTest {
         private val name: String,
         private val state: Int = -1,
         private val event: String? = null,
-        private val deviceName: String? = "MOONDROP",
+        private val deviceName: String? = "SPACE TRAVEL 2",
     ) : Intent() {
         override fun getAction() = name
         override fun getIntExtra(name: String?, defaultValue: Int) =
