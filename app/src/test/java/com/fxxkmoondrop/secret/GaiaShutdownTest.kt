@@ -130,15 +130,16 @@ class GaiaShutdownTest {
     }
 
     @Test
-    fun `disconnect unregisters automatic discovery and a later explicit connect restores it`() {
+    fun `standalone connection does not register a privileged discovery receiver`() {
         val context = DiscoveryContext()
         client.connect(context, "00:11:22:33:44:55")
-        assertNotNull(context.receiver)
+        assertEquals(0, context.registrations)
+        assertNull(context.receiver)
         client.disconnect()
         assertNull(context.receiver)
         client.connect(context, "00:11:22:33:44:55")
-        assertNotNull(context.receiver)
-        assertEquals(2, context.registrations)
+        assertEquals(0, context.registrations)
+        assertNull(context.receiver)
     }
 
     @Test
@@ -186,7 +187,7 @@ class GaiaShutdownTest {
         override fun getSharedPreferences(name: String?, mode: Int) = preferences
         override fun registerReceiver(receiver: BroadcastReceiver?, filter: IntentFilter?,
                                       broadcastPermission: String?, scheduler: android.os.Handler?): Intent? {
-            assertEquals(HookIpc.PERMISSION, broadcastPermission)
+            assertNull(broadcastPermission)
             this.receiver = receiver
             registrations++
             return null
