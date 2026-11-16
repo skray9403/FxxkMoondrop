@@ -55,6 +55,7 @@ class OverviewFragment : Fragment() {
     private var connectionError: String? = null
     private var connectionStage: String? = null
     private val ancTiles = mutableListOf<Pair<MaterialCardView, Int>>()
+    private val ancTileLabels = mutableMapOf<MaterialCardView, Pair<TextView, TextView>>()
     private var connectionTimeout: Runnable? = null
 
     // UI labels map to the hardware-verified Space Travel 2 values.
@@ -391,8 +392,7 @@ class OverviewFragment : Fragment() {
             AncBridge.setAncMode(mode)
             refreshAncSelection()
         }
-        card.setTag(android.R.id.title, glyph)
-        card.setTag(android.R.id.text1, title)
+        ancTileLabels[card] = glyph to title
         ancTiles.add(card to mode)
         return card
     }
@@ -757,10 +757,9 @@ class OverviewFragment : Fragment() {
             val active = mode == selected
             card.setCardBackgroundColor(if (active) pal.secondaryContainer else pal.card)
             card.strokeColor = if (active) pal.primary else pal.cardStroke
-            val glyph = card.getTag(android.R.id.title) as? TextView
-            val label = card.getTag(android.R.id.text1) as? TextView
-            glyph?.setTextColor(if (active) pal.onSecondaryContainer else pal.onVariant)
-            label?.setTextColor(if (active) pal.onSecondaryContainer else pal.onSurface)
+            val labels = ancTileLabels[card]
+            labels?.first?.setTextColor(if (active) pal.onSecondaryContainer else pal.onVariant)
+            labels?.second?.setTextColor(if (active) pal.onSecondaryContainer else pal.onSurface)
         }
     }
 
