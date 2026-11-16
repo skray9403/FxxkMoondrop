@@ -1,9 +1,16 @@
 package com.fxxkmoondrop.secret
 
+import android.Manifest
+import android.bluetooth.BluetoothAdapter
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Canvas
+import android.graphics.LinearGradient
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.RectF
+import android.graphics.Shader
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -11,6 +18,7 @@ import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -20,230 +28,428 @@ import com.google.android.material.button.MaterialButton
 import com.google.android.material.button.MaterialButtonToggleGroup
 import com.google.android.material.card.MaterialCardView
 
-/** Space Travel 2 only: verified ANC mapping, three gain levels and L/R battery. */
+/** Space Travel 2 overview, with a product-first layout and direct paired-device fallback. */
 class OverviewFragment : Fragment() {
     private lateinit var pal: ThemeUtil.Palette
     private lateinit var root: LinearLayout
     private lateinit var status: TextView
     private lateinit var deviceName: TextView
     private lateinit var leftBattery: BatteryRingView
-    private lateinit var caseBattery: BatteryRingView
     private lateinit var rightBattery: BatteryRingView
-    private lateinit var ancGroup: MaterialButtonToggleGroup
+    private lateinit var ancGrid: LinearLayout
     private lateinit var gainGroup: MaterialButtonToggleGroup
-    private lateinit var eqButton: MaterialButton
+    private lateinit var eqCard: MaterialCardView
     private lateinit var connectButton: MaterialButton
+    private lateinit var actionRow: LinearLayout
+
     private val handler = Handler(Looper.getMainLooper())
     private var rebuilding = false
+    private var connectionInProgress = false
+    private var pairingRequired = false
+    private var connectionError: String? = null
+    private val ancTiles = mutableListOf<Pair<MaterialCardView, Int>>()
+    private var connectionTimeout: Runnable? = null
 
-    // UI 0=Off, 1=ANC, 2=Transparency, 3=Wind. Space Travel 2 profile mapping is tested.
-    private val ancModes = listOf(1, 0, 3, 2)
+    // UI labels map to the hardware-verified Space Travel 2 values.
+    private val ancModes = listOf(
+        Triple(1, "Noise cancelling", "◉"),
+        Triple(0, "Off", "○"),
+        Triple(3, "Wind reduction", "≈"),
+        Triple(2, "Transparency", "◎")
+    )
 
     private val callback = object : GaiaBleClient.Callback {
         override fun onConnected(address: String) {
             handler.post {
-                val ctx = context ?: return@post
-                DeviceControlBridge.refreshProfile(ctx)
+                connectionInProgress = false
+                connectionError = null
+                connectionTimeout?.let { handler.removeCallbacks(it) }
+                context?.let { DeviceControlBridge.refreshProfile(it) }
+                GaiaBleClient.getInstance().setDcBridge(DeviceControlBridge)
                 GaiaBleClient.getInstance().fetchBatteryLevels()
                 AncBridge.fetchAncMode()
                 DeviceControlBridge.fetchGain()
                 refreshUi()
             }
         }
-        override fun onDisconnected(address: String) { handler.post { refreshUi() } }
-        override fun onBatteryLevel(batteryId: Int, level: Int) { handler.post { refreshBattery() } }
-        override fun onAncMode(mode: Int) { handler.post { refreshAncSelection() } }
+
+        override fun onDisconnected(address: String) {
+            handler.post {
+                connectionInProgress = false
+                refreshUi()
+            }
+        }
+
+        override fun onBatteryLevel(batteryId: Int, level: Int) {
+            handler.post { refreshBattery() }
+        }
+
+        override fun onAncMode(mode: Int) {
+            handler.post { refreshAncSelection() }
+        }
+
         override fun onError(message: String) {
             handler.post {
-                if (isAdded && ::status.isInitialized) {
-                    status.text = message
-                    status.setTextColor(pal.red)
+                connectionInProgress = false
+                connectionError = "Couldn't connect. Keep both earbuds awake and try again."
+                connectionTimeout?.let { handler.removeCallbacks(it) }
+                if (isAdded) {
+                    Toast.makeText(requireContext(), connectionError, Toast.LENGTH_LONG).show()
+                    refreshUi()
                 }
             }
         }
     }
 
-    override fun onCreateView(inflater: android.view.LayoutInflater, container: ViewGroup?,
-                              savedInstanceState: Bundle?): View {
+    override fun onCreateView(
+        inflater: android.view.LayoutInflater,
+        container: ViewGroup?,
+        savedInstanceState: Bundle?
+    ): View {
         Lang.refresh(requireContext())
         pal = ThemeUtil.Palette(requireContext())
 
         val scroller = ScrollView(requireContext()).apply {
             clipToPadding = false
             setBackgroundColor(pal.surface)
-            setPadding(dp(16), dp(12), dp(16), dp(28))
+            setOnApplyWindowInsetsListener { view, insets ->
+                if (Build.VERSION.SDK_INT >= 30) {
+                    val bars = insets.getInsets(WindowInsets.Type.systemBars())
+                    view.setPadding(dp(20), bars.top + dp(18), dp(20), bars.bottom + dp(132))
+                } else {
+                    @Suppress("DEPRECATION")
+                    view.setPadding(
+                        dp(20),
+                        insets.systemWindowInsetTop + dp(18),
+                        dp(20),
+                        insets.systemWindowInsetBottom + dp(132)
+                    )
+                }
+                insets
+            }
         }
+
         root = LinearLayout(requireContext()).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(pal.surface)
         }
         scroller.addView(root, ViewGroup.LayoutParams(-1, -2))
 
+        buildHeader()
+        buildProductCard()
+        buildBatterySection()
+        buildNoiseSection()
+        buildGainSection()
+        buildEqualizerSection()
+        refreshUi()
+
+        scroller.post { scroller.requestApplyInsets() }
+        return scroller
+    }
+
+    private fun buildHeader() {
         deviceName = TextView(requireContext()).apply {
             text = "Space Travel 2"
             textSize = 30f
+            letterSpacing = -0.025f
             setTextColor(pal.onSurface)
             typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
         }
         root.addView(deviceName)
+
+        val stateRow = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val dot = TextView(requireContext()).apply {
+            text = "●"
+            textSize = 10f
+            setTextColor(pal.outline)
+        }
         status = TextView(requireContext()).apply {
-            text = Lang.t("正在查找耳机…", "Looking for earbuds…")
+            text = "Not connected"
             textSize = 14f
             setTextColor(pal.onVariant)
+            setPadding(dp(7), 0, 0, 0)
         }
-        root.addView(status, columnParams(top = 4, bottom = 18))
+        stateRow.addView(dot)
+        stateRow.addView(status)
+        root.addView(stateRow, columnParams(bottom = 18))
+    }
 
-        addSection(Lang.t("电量", "Battery"))
-        val batteryCard = MaterialCardView(requireContext()).apply {
-            radius = dp(28).toFloat()
-            setCardBackgroundColor(pal.card)
+    private fun buildProductCard() {
+        val card = MaterialCardView(requireContext()).apply {
+            radius = dp(30).toFloat()
+            setCardBackgroundColor(pal.secondaryContainer)
             strokeWidth = 0
             cardElevation = 0f
-            setContentPadding(dp(8), dp(16), dp(8), dp(16))
+            setContentPadding(dp(12), dp(10), dp(12), dp(18))
         }
-        val batteryRow = LinearLayout(requireContext()).apply {
+        val content = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+        }
+        content.addView(ProductIllustrationView(requireContext(), pal),
+            LinearLayout.LayoutParams(-1, dp(176)))
+
+        content.addView(TextView(requireContext()).apply {
+            text = "MOONDROP  ·  SPACE TRAVEL 2"
+            textSize = 11f
+            letterSpacing = 0.12f
+            setTextColor(pal.onSecondaryContainer)
+            gravity = Gravity.CENTER
+            typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
+        }, columnParams(top = 2, bottom = 12))
+
+        connectButton = MaterialButton(requireContext()).apply {
+            text = "Connect"
+            isAllCaps = false
+            setOnClickListener {
+                if (pairingRequired) openBluetoothSettings() else connectToHeadset()
+            }
+        }
+        content.addView(connectButton, LinearLayout.LayoutParams(-1, dp(52)))
+        card.addView(content)
+        root.addView(card, columnParams(bottom = 22))
+    }
+
+    private fun buildBatterySection() {
+        addSection("Battery", "Your earbuds' current charge")
+
+        val card = MaterialCardView(requireContext()).apply {
+            radius = dp(26).toFloat()
+            setCardBackgroundColor(pal.card)
+            strokeWidth = dp(1)
+            strokeColor = pal.cardStroke
+            cardElevation = 0f
+            setContentPadding(dp(8), dp(14), dp(8), dp(10))
+        }
+        val row = LinearLayout(requireContext()).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
         }
         leftBattery = BatteryRingView(requireContext(), pal).apply {
-            label = Lang.t("左耳", "Left")
+            label = "Left"
             setLevel(-1)
-        }
-        caseBattery = BatteryRingView(requireContext(), pal).apply {
-            label = Lang.t("充电盒", "Case")
-            setUnavailable(Lang.t("未上报", "Not reported"))
         }
         rightBattery = BatteryRingView(requireContext(), pal).apply {
-            label = Lang.t("右耳", "Right")
+            label = "Right"
             setLevel(-1)
         }
-        listOf(leftBattery, caseBattery, rightBattery).forEach {
-            batteryRow.addView(it, LinearLayout.LayoutParams(0, dp(118), 1f))
-        }
-        batteryCard.addView(batteryRow)
-        root.addView(batteryCard)
+        row.addView(leftBattery, LinearLayout.LayoutParams(0, dp(122), 1f))
+        row.addView(rightBattery, LinearLayout.LayoutParams(0, dp(122), 1f))
+        card.addView(row)
+        root.addView(card)
 
-        val actionRow = LinearLayout(requireContext()).apply {
+        actionRow = LinearLayout(requireContext()).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
         }
         val forget = MaterialButton(requireContext(), null,
             com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-            text = Lang.t("取消配对", "Forget")
-            setOnClickListener {
-                Toast.makeText(requireContext(),
-                    Lang.t("请在系统蓝牙设置中选择“取消配对”。",
-                        "Choose “Forget” in Android Bluetooth settings to unpair the earbuds."),
-                    Toast.LENGTH_LONG).show()
-                openBluetoothSettings()
-            }
+            text = "Forget"
+            isAllCaps = false
+            setOnClickListener { openBluetoothSettings() }
         }
         val disconnect = MaterialButton(requireContext(), null,
             com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-            text = Lang.t("断开", "Disconnect")
+            text = "Disconnect"
+            isAllCaps = false
             setOnClickListener {
+                connectionInProgress = false
+                connectionError = null
+                connectionTimeout?.let { handler.removeCallbacks(it) }
                 GaiaBleClient.getInstance().shutdown()
                 refreshUi()
             }
         }
-        actionRow.addView(forget, LinearLayout.LayoutParams(0, dp(52), 1f).also { it.marginEnd = dp(6) })
-        actionRow.addView(disconnect, LinearLayout.LayoutParams(0, dp(52), 1f).also { it.marginStart = dp(6) })
-        root.addView(actionRow, columnParams(top = 14, bottom = 20))
+        actionRow.addView(forget, LinearLayout.LayoutParams(0, dp(48), 1f).also {
+            it.marginEnd = dp(6)
+        })
+        actionRow.addView(disconnect, LinearLayout.LayoutParams(0, dp(48), 1f).also {
+            it.marginStart = dp(6)
+        })
+        root.addView(actionRow, columnParams(top = 10, bottom = 8))
+    }
 
-        addSection(Lang.t("主动降噪", "Active noise control"))
-        ancGroup = MaterialButtonToggleGroup(requireContext()).apply {
-            isSingleSelection = true
-            isSelectionRequired = true
-            orientation = MaterialButtonToggleGroup.HORIZONTAL
-        }
-        ancModes.forEachIndexed { index, mode ->
-            val label = when (mode) {
-                1 -> Lang.t("降噪", "ANC")
-                0 -> Lang.t("关闭", "Off")
-                3 -> Lang.t("抗风噪", "Wind")
-                else -> Lang.t("通透", "Transparency")
-            }
-            val button = MaterialButton(requireContext(), null,
-                com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-                id = View.generateViewId()
-                tag = mode
-                text = label
-                isCheckable = true
-                textSize = 11f
-                insetTop = 0
-                insetBottom = 0
-                minimumHeight = dp(54)
-            }
-            ancGroup.addView(button, LinearLayout.LayoutParams(0, dp(58), 1f).also {
-                it.marginEnd = if (index == ancModes.lastIndex) 0 else dp(4)
-            })
-        }
-        ancGroup.addOnButtonCheckedListener { group, checkedId, isChecked ->
-            if (!rebuilding && isChecked) {
-                val selected = group.findViewById<MaterialButton>(checkedId)?.tag as? Int
-                    ?: return@addOnButtonCheckedListener
-                if (GaiaBleClient.getInstance().isGaiaReady()) AncBridge.setAncMode(selected)
-                else refreshAncSelection()
-            }
-        }
-        root.addView(ancGroup)
+    private fun buildNoiseSection() {
+        addSection("Noise control", "Choose how much of the outside world you hear")
 
-        addSection(Lang.t("声音增益", "Sound gain"))
+        ancGrid = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        for (rowIndex in 0..1) {
+            val row = LinearLayout(requireContext()).apply {
+                orientation = LinearLayout.HORIZONTAL
+            }
+            for (column in 0..1) {
+                val item = ancModes[rowIndex * 2 + column]
+                row.addView(createAncTile(item.first, item.second, item.third),
+                    LinearLayout.LayoutParams(0, dp(66), 1f).also {
+                        if (column == 0) it.marginEnd = dp(6) else it.marginStart = dp(6)
+                        if (rowIndex == 1) it.topMargin = dp(8)
+                    })
+            }
+            ancGrid.addView(row, LinearLayout.LayoutParams(-1, -2))
+        }
+        root.addView(ancGrid)
+    }
+
+    private fun createAncTile(mode: Int, label: String, symbol: String): MaterialCardView {
+        val card = MaterialCardView(requireContext()).apply {
+            radius = dp(20).toFloat()
+            setCardBackgroundColor(pal.card)
+            strokeWidth = dp(1)
+            strokeColor = pal.cardStroke
+            cardElevation = 0f
+            isClickable = true
+            isFocusable = true
+            tag = mode
+        }
+        val row = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(8), dp(8), dp(8))
+        }
+        val glyph = TextView(requireContext()).apply {
+            text = symbol
+            textSize = 23f
+            gravity = Gravity.CENTER
+            setTextColor(pal.onVariant)
+        }
+        val title = TextView(requireContext()).apply {
+            text = label
+            textSize = 13f
+            setTextColor(pal.onSurface)
+            typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
+            setPadding(dp(10), 0, 0, 0)
+        }
+        row.addView(glyph, LinearLayout.LayoutParams(dp(28), -2))
+        row.addView(title, LinearLayout.LayoutParams(0, -2, 1f))
+        card.addView(row)
+        card.setOnClickListener {
+            if (!GaiaBleClient.getInstance().isGaiaReady()) return@setOnClickListener
+            AncBridge.setAncMode(mode)
+            refreshAncSelection()
+        }
+        card.tag = mode
+        card.setTag(android.R.id.title, glyph)
+        card.setTag(android.R.id.text1, title)
+        ancTiles.add(card to mode)
+        return card
+    }
+
+    private fun buildGainSection() {
+        addSection("Sound gain", "Set the output level")
+
         gainGroup = MaterialButtonToggleGroup(requireContext()).apply {
             isSingleSelection = true
             isSelectionRequired = true
         }
-        listOf(Lang.t("低", "Low"), Lang.t("中", "Medium"), Lang.t("高", "High"))
-            .forEachIndexed { index, label ->
-                val button = MaterialButton(requireContext(), null,
-                    com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-                    id = View.generateViewId()
-                    tag = index
-                    text = label
-                    isCheckable = true
-                    minimumHeight = dp(52)
-                }
-                gainGroup.addView(button, LinearLayout.LayoutParams(0, dp(54), 1f).also {
-                    it.marginEnd = if (index == 2) 0 else dp(6)
-                })
+        listOf("Low", "Medium", "High").forEachIndexed { index, label ->
+            val button = MaterialButton(requireContext(), null,
+                com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+                id = View.generateViewId()
+                tag = index
+                text = label
+                textSize = 13f
+                isAllCaps = false
+                isCheckable = true
+                minimumHeight = dp(54)
+                insetTop = 0
+                insetBottom = 0
             }
+            gainGroup.addView(button, LinearLayout.LayoutParams(0, dp(58), 1f).also {
+                if (index != 0) it.marginStart = dp(4)
+                if (index != 2) it.marginEnd = dp(4)
+            })
+        }
         gainGroup.addOnButtonCheckedListener { group, checkedId, isChecked ->
             if (!rebuilding && isChecked) {
                 val level = group.findViewById<MaterialButton>(checkedId)?.tag as? Int
                     ?: return@addOnButtonCheckedListener
-                if (GaiaBleClient.getInstance().isGaiaReady()) DeviceControlBridge.setGain(level)
-                else refreshGainSelection()
+                if (GaiaBleClient.getInstance().isGaiaReady()) {
+                    DeviceControlBridge.setGain(level)
+                } else {
+                    refreshGainSelection()
+                }
             }
         }
         root.addView(gainGroup)
+    }
 
-        addSection(Lang.t("更多控制", "More controls"))
-        eqButton = MaterialButton(requireContext(), null,
-            com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-            text = Lang.t("参数均衡器", "Parametric equalizer")
-            textAlignment = View.TEXT_ALIGNMENT_TEXT_START
-            setIconResource(R.drawable.ic_tune)
-            iconGravity = MaterialButton.ICON_GRAVITY_START
+    private fun buildEqualizerSection() {
+        addSection("Equalizer", "Fine-tune the sound to your preference")
+
+        eqCard = MaterialCardView(requireContext()).apply {
+            radius = dp(22).toFloat()
+            setCardBackgroundColor(pal.card)
+            strokeWidth = dp(1)
+            strokeColor = pal.cardStroke
+            cardElevation = 0f
+            isClickable = true
+            isFocusable = true
             setOnClickListener {
                 if (isEnabled) startActivity(Intent(requireContext(), EqEditorActivity::class.java))
             }
         }
-        root.addView(eqButton, LinearLayout.LayoutParams(-1, dp(58)))
-        root.addView(TextView(requireContext()).apply {
-            text = Lang.t("仅当检测到耳机的 9ECA BLE 服务时显示可用。", 
-                "Available when the earbud's 9ECA BLE service is detected.")
+
+        val row = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(18), dp(16), dp(16), dp(16))
+        }
+        val icon = TextView(requireContext()).apply {
+            text = "≋"
+            textSize = 28f
+            setTextColor(pal.primary)
+            gravity = Gravity.CENTER
+        }
+        val copy = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), 0, 0, 0)
+        }
+        copy.addView(TextView(requireContext()).apply {
+            text = "Parametric equalizer"
+            textSize = 15f
+            setTextColor(pal.onSurface)
+            typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
+        })
+        copy.addView(TextView(requireContext()).apply {
+            text = "9-band tuning"
             textSize = 12f
             setTextColor(pal.onVariant)
-            setPadding(dp(2), dp(6), dp(2), 0)
+            setPadding(0, dp(3), 0, 0)
+            tag = "eq_summary"
         })
+        row.addView(icon, LinearLayout.LayoutParams(dp(34), dp(38)))
+        row.addView(copy, LinearLayout.LayoutParams(0, -2, 1f))
+        row.addView(TextView(requireContext()).apply {
+            text = "›"
+            textSize = 28f
+            setTextColor(pal.onVariant)
+        })
+        eqCard.addView(row)
+        root.addView(eqCard, columnParams(top = 2))
+    }
 
-        connectButton = MaterialButton(requireContext()).apply {
-            text = Lang.t("连接耳机", "Connect")
-            setOnClickListener { connectToHeadset() }
+    private fun addSection(title: String, subtitle: String) {
+        val block = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
         }
-        root.addView(connectButton, columnParams(top = 20))
-        refreshUi()
-        return scroller
+        block.addView(TextView(requireContext()).apply {
+            text = title
+            textSize = 18f
+            setTextColor(pal.onSurface)
+            typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
+        })
+        block.addView(TextView(requireContext()).apply {
+            text = subtitle
+            textSize = 12f
+            setTextColor(pal.onVariant)
+            setPadding(0, dp(3), 0, dp(10))
+        })
+        root.addView(block, columnParams(top = 4, bottom = 4))
     }
 
     override fun onResume() {
@@ -251,6 +457,7 @@ class OverviewFragment : Fragment() {
         if (!::root.isInitialized) return
         val gaia = GaiaBleClient.getInstance()
         gaia.setCallback(callback)
+        gaia.setDcBridge(DeviceControlBridge)
         DeviceControlBridge.setStateListener { handler.post { refreshGainSelection() } }
         DeviceControlBridge.refreshProfile(requireContext())
         connectToHeadset()
@@ -264,32 +471,131 @@ class OverviewFragment : Fragment() {
     }
 
     override fun onDestroyView() {
+        connectionTimeout?.let { handler.removeCallbacks(it) }
         handler.removeCallbacksAndMessages(null)
         super.onDestroyView()
     }
 
     private fun connectToHeadset() {
         val ctx = context ?: return
+        if (!ensureBluetoothPermissions()) return
+
         val gaia = GaiaBleClient.getInstance()
         if (gaia.isGaiaReady()) {
+            connectionInProgress = false
+            connectionError = null
             refreshUi()
             gaia.fetchBatteryLevels()
             AncBridge.fetchAncMode()
             DeviceControlBridge.fetchGain()
             return
         }
-        status.text = Lang.t("正在连接 Space Travel 2…", "Connecting to Space Travel 2…")
-        status.setTextColor(pal.onVariant)
+        if (connectionInProgress || gaia.isConnecting()) return
+
+        connectionInProgress = true
+        pairingRequired = false
+        connectionError = null
         connectButton.isEnabled = false
+        connectButton.text = "Connecting…"
+        refreshUi()
+
         Thread {
-            val mac = HeadsetGate.getConnectedMac(ctx)
-            if (mac != null) gaia.connect(ctx.applicationContext, mac)
+            var address: String? = null
+            var pairedDeviceFound = false
+            try {
+                // Prefer the active audio device, but do not make that the only discovery path.
+                address = HeadsetGate.getConnectedMac(ctx)
+                if (address == null) {
+                    val adapter = BluetoothAdapter.getDefaultAdapter()
+                    val bonded = adapter?.bondedDevices?.firstOrNull { device ->
+                        DeviceMatcher.isMoondrop(runCatching { device.name }.getOrNull())
+                    }
+                    if (bonded != null) {
+                        address = bonded.address
+                        pairedDeviceFound = true
+                    }
+                }
+                if (address == null) {
+                    address = ctx.getSharedPreferences("cfg", 0).getString("gaia_le_addr", null)
+                }
+            } catch (e: SecurityException) {
+                android.util.Log.e("MoonEar", "Bluetooth permission denied while finding Space Travel 2", e)
+            } catch (e: Exception) {
+                android.util.Log.w("MoonEar", "Bluetooth device lookup failed", e)
+            }
+
+            val target = address
+            val started = target != null && gaia.connect(ctx.applicationContext, target)
             handler.post {
                 if (!isAdded) return@post
-                connectButton.isEnabled = true
-                refreshUi()
+                if (!started) {
+                    connectionInProgress = false
+                    pairingRequired = target == null
+                    connectionError = if (target == null) {
+                        "Space Travel 2 isn't paired with this phone."
+                    } else {
+                        "Bluetooth could not start the connection. Check Bluetooth and permissions."
+                    }
+                    connectButton.isEnabled = true
+                    connectButton.text = if (pairingRequired) "Pair device" else "Try again"
+                    refreshUi()
+                    if (target == null) {
+                        Toast.makeText(requireContext(),
+                            "Pair Space Travel 2 in Android Bluetooth settings first.",
+                            Toast.LENGTH_LONG).show()
+                    }
+                } else {
+                    connectionTimeout?.let { handler.removeCallbacks(it) }
+                    connectionTimeout = Runnable {
+                        if (isAdded && connectionInProgress && !gaia.isGaiaReady()) {
+                            connectionInProgress = false
+                            connectionError = "Connection timed out. Open the case and try again."
+                            connectButton.isEnabled = true
+                            connectButton.text = "Try again"
+                            refreshUi()
+                        }
+                    }
+                    handler.postDelayed(connectionTimeout!!, 40_000L)
+                    connectButton.isEnabled = false
+                    connectButton.text = "Connecting…"
+                    status.text = "Connecting to Space Travel 2…"
+                }
             }
-        }.start()
+        }.apply {
+            name = "MoonEar-DeviceLookup"
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun ensureBluetoothPermissions(): Boolean {
+        if (Build.VERSION.SDK_INT < 31) return true
+        val missing = arrayOf(
+            Manifest.permission.BLUETOOTH_CONNECT,
+            Manifest.permission.BLUETOOTH_SCAN
+        ).filter {
+            requireContext().checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isEmpty()) return true
+        requestPermissions(missing.toTypedArray(), REQUEST_BLUETOOTH)
+        status.text = "Allow Bluetooth access to connect."
+        return false
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQUEST_BLUETOOTH) return
+        if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+            connectToHeadset()
+        } else {
+            connectionError = "Bluetooth access is required to connect."
+            refreshUi()
+        }
     }
 
     private fun refreshUi() {
@@ -297,23 +603,45 @@ class OverviewFragment : Fragment() {
         val gaia = GaiaBleClient.getInstance()
         val name = gaia.getConnectedDeviceName().orEmpty()
         val connected = gaia.isGaiaReady()
-        val isSpaceTravel2 = name.contains("SPACE TRAVEL 2", true) ||
-            name.contains("太空漫游2") || name.contains("SPACE TRAVEL II", true)
-        deviceName.text = if (name.isNotBlank()) name else "Space Travel 2"
+        val isSpaceTravel2 = name.isBlank() || DeviceMatcher.isMoondrop(name)
+
+        deviceName.text = if (name.isNotBlank() && isSpaceTravel2) name else "Space Travel 2"
         status.text = when {
-            !connected -> Lang.t("未连接", "Not connected")
-            !isSpaceTravel2 -> Lang.t("当前连接的不是 Space Travel 2", "Connected device is not Space Travel 2")
-            else -> Lang.t("已连接 · GAIA + 9ECA", "Connected · GAIA + 9ECA")
+            connected && isSpaceTravel2 -> "Connected"
+            connectionInProgress -> "Connecting to Space Travel 2…"
+            connectionError != null -> connectionError
+            else -> "Not connected"
         }
-        status.setTextColor(if (connected && isSpaceTravel2) pal.primary else pal.onVariant)
-        val usable = connected && isSpaceTravel2
-        ancGroup.isEnabled = usable
-        for (i in 0 until ancGroup.childCount) ancGroup.getChildAt(i).isEnabled = usable
-        gainGroup.isEnabled = usable
-        for (i in 0 until gainGroup.childCount) gainGroup.getChildAt(i).isEnabled = usable
-        eqButton.isEnabled = usable && gaia.hasSrcService()
-        eqButton.alpha = if (eqButton.isEnabled) 1f else 0.55f
-        connectButton.visibility = if (usable) View.GONE else View.VISIBLE
+        status.setTextColor(
+            when {
+                connected && isSpaceTravel2 -> pal.green
+                connectionError != null -> pal.red
+                else -> pal.onVariant
+            }
+        )
+
+        connectButton.visibility = if (connected && isSpaceTravel2) View.GONE else View.VISIBLE
+        connectButton.isEnabled = !connectionInProgress
+        if (!connectionInProgress && connectButton.visibility == View.VISIBLE) {
+            connectButton.text = if (pairingRequired) "Pair device" else if (connectionError != null) "Try again" else "Connect"
+        }
+        actionRow.visibility = if (connected && isSpaceTravel2) View.VISIBLE else View.GONE
+
+        val controlsEnabled = connected && isSpaceTravel2
+        ancTiles.forEach { (card, _) ->
+            card.isEnabled = controlsEnabled
+            card.alpha = if (controlsEnabled) 1f else 0.55f
+        }
+        gainGroup.isEnabled = controlsEnabled
+        for (i in 0 until gainGroup.childCount) gainGroup.getChildAt(i).isEnabled = controlsEnabled
+
+        eqCard.isEnabled = controlsEnabled && gaia.hasSrcService()
+        eqCard.alpha = if (eqCard.isEnabled) 1f else 0.58f
+        val eqSummary = (eqCard.getChildAt(0) as? LinearLayout)
+            ?.getChildAt(1) as? LinearLayout
+        (eqSummary?.getChildAt(1) as? TextView)?.text =
+            if (eqCard.isEnabled) "9ECA service detected" else "Available after 9ECA connection"
+
         refreshBattery()
         refreshAncSelection()
         refreshGainSelection()
@@ -325,54 +653,122 @@ class OverviewFragment : Fragment() {
         val connected = gaia.isGaiaReady()
         leftBattery.setLevel(if (connected) BatteryStore.getGaiaLeft(address) else -1)
         rightBattery.setLevel(if (connected) BatteryStore.getGaiaRight(address) else -1)
-        // The documented Space Travel 2 GAIA telemetry provides L/R battery only.
-        caseBattery.setUnavailable(Lang.t("未上报", "Not reported"))
     }
 
     private fun refreshAncSelection() {
-        if (!::ancGroup.isInitialized) return
-        val mode = AncBridge.getCurrentMode()
-        rebuilding = true
-        val button = (0 until ancGroup.childCount).map { ancGroup.getChildAt(it) as MaterialButton }
-            .firstOrNull { (it.tag as? Int) == mode }
-        if (button != null) ancGroup.check(button.id) else ancGroup.clearChecked()
-        rebuilding = false
+        if (!::ancGrid.isInitialized) return
+        val selected = AncBridge.getCurrentMode()
+        ancTiles.forEach { (card, mode) ->
+            val active = mode == selected
+            card.setCardBackgroundColor(if (active) pal.secondaryContainer else pal.card)
+            card.strokeColor = if (active) pal.primary else pal.cardStroke
+            val glyph = card.getTag(android.R.id.title) as? TextView
+            val label = card.getTag(android.R.id.text1) as? TextView
+            glyph?.setTextColor(if (active) pal.onSecondaryContainer else pal.onVariant)
+            label?.setTextColor(if (active) pal.onSecondaryContainer else pal.onSurface)
+        }
     }
 
     private fun refreshGainSelection() {
         if (!::gainGroup.isInitialized) return
         val level = DeviceControlBridge.getGainLevel()
         rebuilding = true
-        val button = (0 until gainGroup.childCount).map { gainGroup.getChildAt(it) as MaterialButton }
+        val button = (0 until gainGroup.childCount)
+            .map { gainGroup.getChildAt(it) as MaterialButton }
             .firstOrNull { (it.tag as? Int) == level }
         if (button != null) gainGroup.check(button.id) else gainGroup.clearChecked()
         rebuilding = false
     }
 
-    private fun addSection(title: String) {
-        root.addView(TextView(requireContext()).apply {
-            text = title
-            textSize = 14f
-            setTextColor(pal.onVariant)
-            typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
-            setPadding(0, dp(18), 0, dp(10))
-        })
-    }
-
-    private fun columnParams(top: Int = 0, bottom: Int = 0) =
-        LinearLayout.LayoutParams(-1, -2).also { it.topMargin = dp(top); it.bottomMargin = dp(bottom) }
-
     private fun openBluetoothSettings() {
         runCatching { startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) }
     }
 
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+    private fun columnParams(top: Int = 0, bottom: Int = 0) =
+        LinearLayout.LayoutParams(-1, -2).also {
+            it.topMargin = dp(top)
+            it.bottomMargin = dp(bottom)
+        }
 
-    private class BatteryRingView(context: android.content.Context, private val palette: ThemeUtil.Palette) : View(context) {
+    private fun dp(value: Int): Int =
+        (value * resources.displayMetrics.density).toInt()
+
+    private class ProductIllustrationView(
+        context: android.content.Context,
+        private val palette: ThemeUtil.Palette
+    ) : View(context) {
+        private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 1.5f * resources.displayMetrics.density
+        }
+        private val d = resources.displayMetrics.density
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val cx = width / 2f
+            val cy = height * 0.55f
+            val caseW = minOf(width * 0.48f, 188f * d)
+            val caseH = 70f * d
+            val left = cx - caseW / 2f
+            val top = cy - caseH / 2f + 18f * d
+
+            // Soft shadow beneath the case.
+            fill.color = 0x18000000
+            canvas.drawOval(RectF(left + 14f * d, top + caseH - 2f * d,
+                left + caseW - 14f * d, top + caseH + 13f * d), fill)
+
+            fill.shader = LinearGradient(
+                left, top, left + caseW, top + caseH,
+                intArrayOf(0xFFFDFDFD.toInt(), 0xFFE3E2E4.toInt()),
+                null, Shader.TileMode.CLAMP
+            )
+            canvas.drawRoundRect(RectF(left, top, left + caseW, top + caseH),
+                25f * d, 25f * d, fill)
+            fill.shader = null
+            stroke.color = 0x80736F70.toInt()
+            canvas.drawRoundRect(RectF(left, top, left + caseW, top + caseH),
+                25f * d, 25f * d, stroke)
+
+            // Lid seam and the tiny charging indicator.
+            stroke.color = 0x66736F70
+            canvas.drawLine(left + 12f * d, top + 25f * d,
+                left + caseW - 12f * d, top + 25f * d, stroke)
+            fill.color = palette.primary
+            canvas.drawCircle(cx, top + 47f * d, 2.4f * d, fill)
+
+            drawEarbud(canvas, cx - 47f * d, cy - 37f * d, -13f)
+            drawEarbud(canvas, cx + 47f * d, cy - 37f * d, 13f)
+        }
+
+        private fun drawEarbud(canvas: Canvas, x: Float, y: Float, angle: Float) {
+            canvas.save()
+            canvas.rotate(angle, x, y)
+            fill.shader = LinearGradient(
+                x - 15f * d, y - 18f * d, x + 18f * d, y + 33f * d,
+                intArrayOf(0xFFFFFFFF.toInt(), 0xFFDAD9DC.toInt()),
+                null, Shader.TileMode.CLAMP
+            )
+            canvas.drawRoundRect(RectF(x - 7f * d, y + 2f * d,
+                x + 7f * d, y + 39f * d), 6f * d, 6f * d, fill)
+            canvas.drawCircle(x, y, 15f * d, fill)
+            fill.shader = null
+            stroke.color = 0x806D696A.toInt()
+            canvas.drawCircle(x, y, 15f * d, stroke)
+            fill.color = 0xFF494649.toInt()
+            canvas.drawCircle(x, y, 5f * d, fill)
+            canvas.restore()
+        }
+    }
+
+    private class BatteryRingView(
+        context: android.content.Context,
+        private val palette: ThemeUtil.Palette
+    ) : View(context) {
         var label: String = ""
             set(value) { field = value; invalidate() }
+
         private var level = -1
-        private var unavailableText = "—"
         private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
             strokeCap = Paint.Cap.ROUND
@@ -388,14 +784,7 @@ class OverviewFragment : Fragment() {
         }
 
         fun setLevel(value: Int) {
-            level = value.coerceIn(-1, 100)
-            unavailableText = "—"
-            invalidate()
-        }
-
-        fun setUnavailable(text: String) {
-            level = -1
-            unavailableText = text
+            level = value.takeIf { it in 0..100 } ?: -1
             invalidate()
         }
 
@@ -403,20 +792,25 @@ class OverviewFragment : Fragment() {
             super.onDraw(canvas)
             val d = resources.displayMetrics.density
             val cx = width / 2f
-            val cy = 43f * d
-            val radius = 29f * d
+            val cy = 39f * d
+            val radius = 27f * d
             ring.color = palette.outline
             val bounds = RectF(cx - radius, cy - radius, cx + radius, cy + radius)
             canvas.drawArc(bounds, -90f, 360f, false, ring)
-            ring.color = if (level >= 0) palette.primary else palette.outline
-            if (level >= 0) canvas.drawArc(bounds, -90f, 360f * level / 100f, false, ring)
+            if (level >= 0) {
+                ring.color = palette.primary
+                canvas.drawArc(bounds, -90f, 360f * level / 100f, false, ring)
+            }
             text.color = palette.onSurface
             text.textSize = 15f * d
             canvas.drawText(if (level >= 0) "$level%" else "—", cx, cy + 5f * d, text)
             small.color = palette.onVariant
-            small.textSize = 11f * d
-            canvas.drawText(if (unavailableText != "—") unavailableText else label,
-                cx, 95f * d, small)
+            small.textSize = 12f * d
+            canvas.drawText(label, cx, 91f * d, small)
         }
+    }
+
+    companion object {
+        private const val REQUEST_BLUETOOTH = 0x4D42
     }
 }
