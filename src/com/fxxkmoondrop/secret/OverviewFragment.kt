@@ -40,6 +40,12 @@ class OverviewFragment : Fragment() {
     private lateinit var gainGroup: MaterialButtonToggleGroup
     private lateinit var eqCard: MaterialCardView
     private lateinit var connectButton: MaterialButton
+    private lateinit var connectionCard: MaterialCardView
+    private lateinit var batterySection: LinearLayout
+    private lateinit var noiseSection: LinearLayout
+    private lateinit var gainSection: LinearLayout
+    private lateinit var equalizerSection: LinearLayout
+    private lateinit var caseBattery: BatteryRingView
     private lateinit var actionRow: LinearLayout
 
     private val handler = Handler(Looper.getMainLooper())
@@ -47,6 +53,7 @@ class OverviewFragment : Fragment() {
     private var connectionInProgress = false
     private var pairingRequired = false
     private var connectionError: String? = null
+    private var connectionStage: String? = null
     private val ancTiles = mutableListOf<Pair<MaterialCardView, Int>>()
     private var connectionTimeout: Runnable? = null
 
@@ -63,6 +70,7 @@ class OverviewFragment : Fragment() {
             handler.post {
                 connectionInProgress = false
                 connectionError = null
+                connectionStage = null
                 connectionTimeout?.let { handler.removeCallbacks(it) }
                 context?.let { DeviceControlBridge.refreshProfile(it) }
                 GaiaBleClient.getInstance().setDcBridge(DeviceControlBridge)
@@ -76,6 +84,7 @@ class OverviewFragment : Fragment() {
         override fun onDisconnected(address: String) {
             handler.post {
                 connectionInProgress = false
+                connectionStage = null
                 refreshUi()
             }
         }
@@ -91,7 +100,16 @@ class OverviewFragment : Fragment() {
         override fun onError(message: String) {
             handler.post {
                 connectionInProgress = false
-                connectionError = "Couldn't connect. Keep both earbuds awake and try again."
+                connectionStage = null
+                connectionError = when {
+                    message.contains("timeout", ignoreCase = true) ->
+                        "Connection timed out. Open the case and keep both earbuds awake."
+                    message.contains("service discovery", ignoreCase = true) ||
+                        message.contains("GAIA", ignoreCase = true) ->
+                        "Earbuds found, but their control service did not respond. Keep both buds awake and retry."
+                    else -> "Connection failed: $message"
+                }
+                android.util.Log.e("MoonEar", "GAIA connection error: $message")
                 connectionTimeout?.let { handler.removeCallbacks(it) }
                 if (isAdded) {
                     Toast.makeText(requireContext(), connectionError, Toast.LENGTH_LONG).show()
@@ -490,11 +508,34 @@ class OverviewFragment : Fragment() {
             DeviceControlBridge.fetchGain()
             return
         }
-        if (connectionInProgress || gaia.isConnecting()) return
+        if (connectionInProgress) return
+        if (gaia.isConnecting()) {
+            // The monitor service may have started GATT before this screen resumed.
+            // Adopt that in-flight session instead of leaving the UI stuck at "Not connected".
+            connectionInProgress = true
+            pairingRequired = false
+            connectionError = null
+            connectionStage = "Connecting to the earbuds…"
+            connectButton.isEnabled = false
+            connectButton.text = "Connecting…"
+            connectionTimeout?.let { handler.removeCallbacks(it) }
+            connectionTimeout = Runnable {
+                if (isAdded && connectionInProgress && !gaia.isGaiaReady()) {
+                    connectionInProgress = false
+                    connectionStage = null
+                    connectionError = "The earbuds did not finish connecting. Open the case and try again."
+                    refreshUi()
+                }
+            }
+            handler.postDelayed(connectionTimeout!!, 40_000L)
+            refreshUi()
+            return
+        }
 
         connectionInProgress = true
         pairingRequired = false
         connectionError = null
+        connectionStage = "Finding Space Travel 2…"
         connectButton.isEnabled = false
         connectButton.text = "Connecting…"
         refreshUi()
@@ -531,10 +572,11 @@ class OverviewFragment : Fragment() {
                 if (!started) {
                     connectionInProgress = false
                     pairingRequired = target == null
+                    connectionStage = null
                     connectionError = if (target == null) {
-                        "Space Travel 2 isn't paired with this phone."
+                        "Space Travel 2 was not found. Pair it in Android Bluetooth settings, then retry."
                     } else {
-                        "Bluetooth could not start the connection. Check Bluetooth and permissions."
+                        "Android could not start the earbud connection. Check Bluetooth access and try again."
                     }
                     connectButton.isEnabled = true
                     connectButton.text = if (pairingRequired) "Pair device" else "Try again"
@@ -545,10 +587,12 @@ class OverviewFragment : Fragment() {
                             Toast.LENGTH_LONG).show()
                     }
                 } else {
+                    connectionStage = "Connecting to Space Travel 2…"
                     connectionTimeout?.let { handler.removeCallbacks(it) }
                     connectionTimeout = Runnable {
                         if (isAdded && connectionInProgress && !gaia.isGaiaReady()) {
                             connectionInProgress = false
+                            connectionStage = null
                             connectionError = "Connection timed out. Open the case and try again."
                             connectButton.isEnabled = true
                             connectButton.text = "Try again"
@@ -608,7 +652,7 @@ class OverviewFragment : Fragment() {
         deviceName.text = if (name.isNotBlank() && isSpaceTravel2) name else "Space Travel 2"
         status.text = when {
             connected && isSpaceTravel2 -> "Connected"
-            connectionInProgress -> "Connecting to Space Travel 2…"
+            connectionInProgress -> connectionStage ?: "Connecting to Space Travel 2…"
             connectionError != null -> connectionError
             else -> "Not connected"
         }
@@ -625,9 +669,14 @@ class OverviewFragment : Fragment() {
         if (!connectionInProgress && connectButton.visibility == View.VISIBLE) {
             connectButton.text = if (pairingRequired) "Pair device" else if (connectionError != null) "Try again" else "Connect"
         }
-        actionRow.visibility = if (connected && isSpaceTravel2) View.VISIBLE else View.GONE
+        val ready = connected && isSpaceTravel2
+        connectionCard.visibility = if (ready) View.GONE else View.VISIBLE
+        actionRow.visibility = if (ready) View.VISIBLE else View.GONE
+        noiseSection.visibility = if (ready) View.VISIBLE else View.GONE
+        gainSection.visibility = if (ready) View.VISIBLE else View.GONE
+        equalizerSection.visibility = if (ready) View.VISIBLE else View.GONE
 
-        val controlsEnabled = connected && isSpaceTravel2
+        val controlsEnabled = ready
         ancTiles.forEach { (card, _) ->
             card.isEnabled = controlsEnabled
             card.alpha = if (controlsEnabled) 1f else 0.55f
@@ -653,6 +702,7 @@ class OverviewFragment : Fragment() {
         val connected = gaia.isGaiaReady()
         leftBattery.setLevel(if (connected) BatteryStore.getGaiaLeft(address) else -1)
         rightBattery.setLevel(if (connected) BatteryStore.getGaiaRight(address) else -1)
+        caseBattery.setLevel(-1)
     }
 
     private fun refreshAncSelection() {
