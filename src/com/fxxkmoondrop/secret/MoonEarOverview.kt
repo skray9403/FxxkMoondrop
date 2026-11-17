@@ -420,7 +420,7 @@ private fun MoonEarDisconnectedPreview() {
 @Preview(showBackground = true, name = "MoonEar · connected")
 @Composable
 private fun MoonEarConnectedPreview() {
-    val palette = PreviewPalette()
+    val palette = ThemeUtil.Palette(LocalContext.current)
     MoonEarOverviewScreen(
         state = MoonEarOverviewState(
             status = "Connected",
