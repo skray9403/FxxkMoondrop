@@ -19,8 +19,8 @@ import androidx.fragment.app.Fragment
  * Compose host for the Space Travel 2 overview.
  *
  * Bluetooth discovery, GAIA transport, protocol state and device controls remain in
- * GaiaBleClient / DeviceControlBridge / AncBridge. This Fragment only adapts their
- * existing callbacks into immutable Compose UI state.
+ * GaiaBleClient / DeviceControlBridge / AncBridge. This Fragment adapts their existing
+ * callbacks into immutable Compose UI state.
  */
 class OverviewFragment : Fragment() {
     private val handler = Handler(Looper.getMainLooper())
