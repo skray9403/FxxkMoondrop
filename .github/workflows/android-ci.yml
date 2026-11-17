@@ -2,7 +2,7 @@ name: Android CI
 
 on:
   push:
-    branches: [main, refactor/m3-alignment]
+    branches: [main, refactor/m3-alignment, refactor/space-travel-2-standalone-m3e, feature/compose-overview-live-edit]
     tags: ['*']
   pull_request:
     branches: [main, refactor/m3-alignment]
