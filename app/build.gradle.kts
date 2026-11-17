@@ -1,8 +1,13 @@
 plugins {
     id("com.android.application")
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 android {
+    buildFeatures {
+        compose = true
+    }
+
     namespace = "com.fxxkmoondrop.secret"
     // Android 17 SDK, required by the current Material 3 toolchain.
     compileSdk = 37
@@ -90,6 +95,14 @@ android {
 }
 
 dependencies {
+    // Jetpack Compose UI toolkit. The BOM keeps Compose artifacts on a tested release set.
+    val composeBom = platform("androidx.compose:compose-bom:2026.09.00")
+    implementation(composeBom)
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.compose.material3:material3")
+    debugImplementation("androidx.compose.ui:ui-tooling")
+
     // AndroidX（版本与旧链 libs/ 一致，2026-08-23 对齐）
     implementation("androidx.activity:activity:1.9.0")
     implementation("androidx.annotation:annotation:1.7.1")
