@@ -5,7 +5,7 @@ import android.content.res.Configuration
 import android.os.Build
 
 /**
- * alpha2.0: 官方 LSPosed 主题架构（VectorTheme 对位）——
+ * alpha2.0: 官方 Material 3 主题架构（VectorTheme 对位）——
  * 跟随系统/浅色/深色 主题模式 + 动态取色开关 + AMOLED 纯黑 + 种子颜色。
  * SP("cfg") 键：theme_mode(0系统/1浅/2深)、dynamic_color(bool,默认开)、amoled(bool)、seed(int)。
  *
@@ -40,13 +40,13 @@ class ThemeUtil {
         @JvmStatic
         fun amoledOn(c: Context): Boolean = amoled(c) && isDark(c)
 
-        /** 种子颜色索引（动态色关闭时生效），默认 0=官方 LSPosed 粉 #f48fb1 */
+        /** 种子颜色索引（动态色关闭时生效），默认 0=官方 Material 3 粉 #f48fb1 */
         @JvmStatic
         fun seed(c: Context): Int =
                 Math.max(0, Math.min(SEEDS.size - 1,
                         c.getSharedPreferences(SP, Context.MODE_PRIVATE).getInt("seed", 0)))
 
-        /** 官方种子色表（首项 = LSPosed Manager colors.xml 里的 #f48fb1） */
+        /** 官方种子色表（首项 = Material 3 Manager colors.xml 里的 #f48fb1） */
         @JvmField
         val SEEDS = intArrayOf(
                 0xFFF48FB1.toInt(), 0xFF6750A4.toInt(), 0xFF4FC3F7.toInt(),
@@ -221,7 +221,7 @@ class ThemeUtil {
                 onSecCont = dyn(c, if (dark) "system_accent1_50" else "system_accent1_900",
                         themedColor(c, dark, R.color.m3_on_primary_container))
             } else {
-                // 种子色生成（官方 LSPosed seed 近似调色）
+                // 种子色生成（官方 Material 3 seed 近似调色）
                 val seed = seedColor(c)
                 prim = if (dark) mix(seed, 0.55f, false) else seed
                 onPrim = if (dark) mix(seed, 0.55f, true) else themedColor(c, dark, R.color.m3_on_primary)
@@ -264,14 +264,14 @@ class ThemeUtil {
             //
             // 上一次（alpha2.52）把描边整个去掉，用户反馈"卡片选项还是一样丑"——
             // 纯靠填充色差分层在浅色下几乎看不见（#FFFFFF 卡片 vs #F3EDF7 底）。
-            // 现在按 M3 规范补回细描边，与 LSPosed 设置页观感一致。
+            // 现在按 M3 规范补回细描边，与 Material 3 设置页观感一致。
             //
             // AMOLED 纯黑下同样保留：卡片 #101010 与纯黑背景几乎同色，
             // 没有描边就彻底分不出层级。
             cardStroke = if (m3 != null) m3.getValue("outlineVariant")
             else dyn(c, if (dark) "system_neutral1_700" else "system_neutral1_200",
                     themedColor(c, dark, R.color.m3_outline_variant))
-            // 卡片间/行间分隔线沿用 outline 淡线（LSPosed 用间距分隔，仅在合并卡内保留细线）
+            // 卡片间/行间分隔线沿用 outline 淡线（Material 3 用间距分隔，仅在合并卡内保留细线）
             divider = ((outline and 0x00FFFFFF) or 0x2E000000.toInt())
             // 注：Android 的 tonal palette 只提供 tone 0/10/50/100/200…/1000，没有 90。
             // 原先写 system_neutral1_90 会 getIdentifier 失败 → 永远走 fallback，

@@ -15,38 +15,11 @@ import android.widget.TextView
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentTransaction
-import androidx.navigationevent.NavigationEventDispatcher
-import androidx.navigationevent.NavigationEventDispatcherOwner
-import com.fxxkmoondrop.secret.ui.miuix.MiuixHostFragment
 
 /**
  * alpha2.12: 官方单 Activity 架构 —— 三页 Fragment 切换，底部导航常驻（M3 官方 fade 仅作用于内容区）。
  */
-// 3.2.13: 实现 `NavigationEventDispatcherOwner`。
-//
-// Miuix 的所有弹层（下拉 `WindowDropdownMenu` / `OverlayListPopup` /
-// `Scaffold` 内的 popupHost）都要读 Compose 的 `LocalWindowInfo.current`，
-// 它由 androidx.navigationevent 提供，要求宿主实现本接口。
-// 缺实现时一点弹层就崩：
-//   IllegalStateException: No NavigationEventDispatcher was provided
-//   via LocalNavigationEventDispatcherOwner
-//
-// `ComponentActivity` 只在 androidx.navigation 存在时才实现它，
-// 而我们只引了 navigation-runtime（不要 NavHost/NavController），
-// 所以这里显式实现：一个无参 NavigationEventDispatcher 即可。
-//
-// ⚠️ 与导航功能无关，不影响任何现有页面架构与行为。
-class MainActivity : BaseFragmentActivity(), NavigationEventDispatcherOwner,
-    com.fxxkmoondrop.secret.ui.miuix.MiuixNavHost {
-
-    // ⚠️ 必须写成 Kotlin 的 `override val`（不是 Java 风格的 override fun
-    // getNavigationEventDispatcher()）—— 该接口是用 Kotlin 声明的
-    // `val navigationEventDispatcher: NavigationEventDispatcher`，
-    // 编译器会明确要求这一点（报 "not implement abstract member:
-    // val navigationEventDispatcher"）。
-    override val navigationEventDispatcher: NavigationEventDispatcher by lazy {
-        NavigationEventDispatcher()
-    }
+class MainActivity : BaseFragmentActivity() {
 
     private var curTab = 1 // 1=概览 2=设置 3=关于
     // 固定 container id：recreate 后 FragmentManager 按保存的 containerId 恢复 fragment；
@@ -85,7 +58,6 @@ class MainActivity : BaseFragmentActivity(), NavigationEventDispatcherOwner,
             bannerView?.let { applyBanner(palRef ?: ThemeUtil.Palette(this)) }
         }
     }
-    private var navBar: com.google.android.material.bottomnavigation.BottomNavigationView? = null
 
     /** 主题设置里的「界面缩放」：改 densityDpi 实现整体缩放（dp 全部跟着走）。 */
     override fun attachBaseContext(newBase: android.content.Context) {
@@ -105,7 +77,7 @@ class MainActivity : BaseFragmentActivity(), NavigationEventDispatcherOwner,
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        AppLog.init(this) // alpha2.16: 运行日志（无 Root 可收集）
+        AppLog.init(this)
         installVisibilityTracking(application) // alpha2.41.9: 后台隐藏判定需要全局可见界面计数
         requestWindowFeature(Window.FEATURE_NO_TITLE)
         if (savedInstanceState != null) curTab = savedInstanceState.getInt(KEY_TAB, 1)
@@ -142,12 +114,8 @@ class MainActivity : BaseFragmentActivity(), NavigationEventDispatcherOwner,
         contentHost = contentWrap
         menuButton = menuBtn
         root.addView(contentWrap, LinearLayout.LayoutParams(-1, 0, 1f))
-        navBar = M3Ui.navBar(this, pal, curTab) { showTab(it) }
         // 3.3.x: 底部导航栏移除 —— 导航统一走侧滑菜单（M3 抽屉式导航）。
         // 底部导航与抽屉同时存在属于两套导航并存，且底栏高度/指示器并不符合 Expressive 规范。
-        // 3.2.13 (D1): Miuix 轨自带 Compose 导航栏，Material 的这根要藏起来，
-        // 否则页面里会出现两根导航栏。
-        syncNavBarVisibility()
         // ── 侧滑菜单：品牌区 / 导航 / 开关 / 通用设置（DrawerLayout，边缘滑动唤出）──
         val drawer = androidx.drawerlayout.widget.DrawerLayout(this)
         drawer.addView(root, androidx.drawerlayout.widget.DrawerLayout.LayoutParams(-1, -1))
@@ -203,15 +171,6 @@ class MainActivity : BaseFragmentActivity(), NavigationEventDispatcherOwner,
 
         if (savedInstanceState == null) showTab(curTab)
 
-        // 3.1.0: 首次启动展示使用引导。只在全新启动时判一次（savedInstanceState == null，
-        // 旋转 / 重建不会重弹）；引导里「跳过」「开始使用」和左上返回都记为已读，
-        // 之后不再自动弹，设置页最底部随时可重看。
-        if (savedInstanceState == null &&
-                !getSharedPreferences("cfg", Context.MODE_PRIVATE)
-                        .getBoolean(OnboardingActivity.KEY_DONE, false)) {
-            try { startActivity(Intent(this, OnboardingActivity::class.java)) } catch (_: Exception) { }
-        }
-
         // Non-waking recovery only; battery exemptions require the user's consent.
         try { KeepAlive.ensure(this) } catch (_: Throwable) { }
         try { KeepAlive.requestWhitelistOnce(this) } catch (_: Throwable) { }
@@ -251,48 +210,7 @@ class MainActivity : BaseFragmentActivity(), NavigationEventDispatcherOwner,
         }
     }
 
-    /** 官方 M3 切换：Fragment fade 过渡（内容动，底栏静止） */
-    /**
-     * 3.2.13: 切换界面风格后立即重建当前页。
-     *
-     * ## 为什么不能用 recreate()
-     *
-     * 用户实测反馈：「点击切换之后不会立即生效，要来回切换一下页面才会生效」。
-     *
-     * 根因在 onCreate 里这一行：
-     *
-     * ```kotlin
-     * if (savedInstanceState == null) showTab(curTab)
-     * ```
-     *
-     * `recreate()` 之后 `savedInstanceState != null`，于是 **showTab 根本不会被调用**，
-     * 而是由 FragmentManager 依据保存的 state 恢复**旧主题的 Fragment**
-     * （此刻仍是 MiuixHostFragment）。SP 里虽然已写成 MATERIAL，界面却不变
-     * —— 必须手动切一次 tab 才会触发 showTab 重新分派。
-     *
-     * 顺带一提，3.2.13 那次「切回 Material 闪退」也出在 recreate 路径上
-     * （FragmentManager 用 `getConstructor()` 重建，要求 Fragment 必须有无参构造）。
-     *
-     * ## 修法
-     *
-     * 直接 `showTab(curTab)`：内部 `ft.replace(containerId, f)` 会按**当前 SP**
-     * 重新分派出对应主题的 Fragment 并替换现有 Fragment。
-     * Activity 本身不重建 —— 底栏、状态栏配色都不受影响，切换更轻。
-     */
-    fun applyStyleSwitch() {
-        // 3.2.13 (D1): 切主题时导航栏要跟着换实现 ——
-        // Material 的 View 导航栏与 Miuix 的 Compose 导航栏二选一。
-        syncNavBarVisibility()
-        showTab(curTab)
-    }
-
-    /**
-     * Material 导航栏只在 Material 轨显示。
-     *
-     * Miuix 轨的导航栏由 `MiuixNavBar` 画在页面的 Scaffold 里，
-     * 这根 View 导航栏必须 `GONE`，否则一屏两根。
-     */
-    /**
+        /**
      * 返回键：抽屉打开时先关抽屉。
      *
      * 必须走 OnBackPressedDispatcher —— Android 13+ 启用预测性返回后，
@@ -363,38 +281,22 @@ class MainActivity : BaseFragmentActivity(), NavigationEventDispatcherOwner,
         return card
     }
 
-    /** 刷新英雄卡文案（连接状态 / 版本 / API 级别）。 */
+    /** Drawer status reflects only app-visible Bluetooth state. */
     private fun refreshStatusCard() {
-        val conn = runCatching { GaiaBleClient.getInstance().isConnected() }.getOrDefault(false)
-        heroStatus?.text = if (conn) Lang.t("已连接", "Connected") else Lang.t("未连接", "Disconnected")
+        val connected = runCatching { GaiaBleClient.getInstance().isConnected() }.getOrDefault(false)
+        heroStatus?.text = if (connected) Lang.t("已连接", "Connected") else Lang.t("未连接", "Disconnected")
         heroSub?.text = runCatching {
-            "V" + (packageManager.getPackageInfo(packageName, 0).versionName ?: "").removePrefix("alpha")
+            "V" + (packageManager.getPackageInfo(packageName, 0).versionName ?: "")
         }.getOrDefault("")
-        // 徽章显示的是**当前链路/编解码器**（与概览页一致），不是系统 API 级别。
-        // 未连接时隐藏：否则和左侧状态词「未连接」重复两遍。
         val link = linkTypeLabel()
         if (link == null) {
             heroBadge?.visibility = View.GONE
         } else {
             heroBadge?.visibility = View.VISIBLE
-            heroBadge?.text = badgeText()
-            refreshCodecBadge()
+            heroBadge?.text = link
         }
     }
 
-    /** 编解码器缓存（dumpsys 查询是百毫秒级，5 秒内不重复查）。 */
-    private var codecLabel: String? = null
-    private var codecQuerying = false
-    private var lastCodecQueryMs = 0L
-
-    /** 徽章文案：编解码器 > 链路类型 > 未连接。 */
-    private fun badgeText(): String {
-        val link = linkTypeLabel() ?: return Lang.t("未连接", "Not connected")
-        codecLabel?.let { if (it.isNotEmpty()) return it }
-        return link
-    }
-
-    /** 链路类型：LE Audio / ACL，无链路返回 null。 */
     private fun linkTypeLabel(): String? {
         return try {
             val am = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
@@ -410,31 +312,6 @@ class MainActivity : BaseFragmentActivity(), NavigationEventDispatcherOwner,
         } catch (_: Throwable) {
             null
         }
-    }
-
-    /** 经 Root 通道读蓝牙栈的当前编解码器（系统 API 是 @SystemApi，普通应用拿不到）。 */
-    private fun refreshCodecBadge() {
-        if (linkTypeLabel() == null) {
-            codecLabel = null
-            return
-        }
-        val now = android.os.SystemClock.elapsedRealtime()
-        if (codecQuerying || now - lastCodecQueryMs < 5000L) return
-        codecQuerying = true
-        lastCodecQueryMs = now
-        Thread {
-            val out = runCatching { RootShell.exec("dumpsys bluetooth_manager | grep -m1 'mCodecConfig:'") }
-                    .getOrNull()
-            val name = Regex("codecName:([A-Za-z0-9 ]+)").find(out ?: "")
-                    ?.groupValues?.get(1)?.trim()
-            runOnUiThread {
-                codecQuerying = false
-                if (!name.isNullOrEmpty()) {
-                    codecLabel = name
-                    heroBadge?.text = badgeText()
-                }
-            }
-        }.start()
     }
 
     /** banner：有自定义图片就显示（裁成胶囊圆角），没有就保持透明 —— 不预设任何图片。 */
@@ -566,7 +443,7 @@ class MainActivity : BaseFragmentActivity(), NavigationEventDispatcherOwner,
     private fun openUpdatePage() {
         runCatching {
             startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW,
-                    android.net.Uri.parse("https://github.com/bqj6666/FxxkMoondrop/releases")))
+                    android.net.Uri.parse("https://github.com/skray9403/FxxkMoondrop/releases")))
         }
     }
 
@@ -818,32 +695,13 @@ class MainActivity : BaseFragmentActivity(), NavigationEventDispatcherOwner,
                 })
     }
 
-    private fun syncNavBarVisibility() {
-        navBar?.visibility = if (MiuixSurface.enabled(this)) View.GONE else View.VISIBLE
-    }
-
-    override fun onMiuixTab(id: Int) {
-        if (id == curTab) return   // 重复点当前项不做无谓重建
-        showTab(id)
-    }
-
     private fun showTab(id: Int) {
         curTab = id
         runCatching { refreshDrawerSelection() }
-        syncNavBarVisibility()
-        // 3.2.13: 双主题分派点（**全项目唯一**）。
-        //
-        // Material 轨一行未改，只是这里多一个 if：选 Miuix 时走 ui/miuix 下的
-        // Compose 实现，否则走原 Fragment。两套并存，用户在设置页随时切换。
-        // 删掉整个 ui/miuix 目录 + 这个 if 即可回到纯 Material。
-        val miuix = MiuixSurface.enabled(this)
         val f: Fragment = when (id) {
-            2 -> if (miuix) MiuixHostFragment.newInstance(MiuixHostFragment.Screen.SETTINGS)
-                 else SettingsFragment()
-            3 -> if (miuix) MiuixHostFragment.newInstance(MiuixHostFragment.Screen.ABOUT)
-                 else AboutFragment()
-            else -> if (miuix) MiuixHostFragment.newInstance(MiuixHostFragment.Screen.OVERVIEW)
-                    else OverviewFragment()
+            2 -> SettingsFragment()
+            3 -> AboutFragment()
+            else -> OverviewFragment()
         }
         val ft: FragmentTransaction = supportFragmentManager.beginTransaction()
         // alpha2.53: 对齐 org.lsposed.manager 的切页动效 ——

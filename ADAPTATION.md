@@ -1,433 +1,53 @@
-# FxxkMoondrop 适配说明
+# Space Travel 2 adaptation notes
 
-> 版本：3.3.1（versionCode 351） ｜ 更新日期：2026-10-27
 
-> 本文档记录 FxxkMoondrop 项目在 Moondrop 耳机适配过程中积累的协议知识、踩坑经验和实测数据。
+This branch focuses on **Moondrop Space Travel 2**.
 
-## 设备与连接
+## Device and protocols
 
-| 项目 | 说明 |
+
+| Item | Verified project value |
 |---|---|
-| 目标设备 | Moondrop 全系列高通 QCC 耳机（GAIA V3/V4）+ 中科蓝讯耳机（9ECA） |
-| 已实测 | 梦回2 / Golden Ages 2（GA2，TWS-01 定制 SoC）；布丁 PUDDING（MD-TWS-056，GAIA V4 over RFCOMM）；太空漫游2 / Space Travel 2（BT8932F 蓝讯，9ECA）；太空漫游2 ULTRA；U.C.T.S（MD-OWS-014，开放式，**硬件无降噪**，GAIA 识别与控制正常） |
-| 连接方式 | GA2: BLE GATT 直连；布丁: Classic Bluetooth RFCOMM / SPP；太空漫游2: BLE GATT 直连 |
-| 业务协议 | Qualcomm GAIA V3 over BLE（GA2）/ GAIA V4 over RFCOMM（布丁）/ GAIA V3（ANC）+ 9ECA 私有协议（太空漫游2） |
-| 包名 | `com.fxxkmoondrop.secret` |
-
-### BLE GATT 服务与特征 UUID
-
-| 用途 | UUID |
-|---|---|
-| GAIA Service | `00001100-d102-11e1-9b23-00025b00a5a5` |
-| Command（写入） | `00001101-d102-11e1-9b23-00025b00a5a5` |
-| Response（通知） | `00001102-d102-11e1-9b23-00025b00a5a5` |
-| Data（通知） | `00001103-d102-11e1-9b23-00025b00a5a5` |
-| CCCD | `00002902-0000-1000-8000-00805f9b34fb` |
-
-> 注意：GA2 存在双地址问题——系统配对使用的 PUBLIC 地址无法直接走 BLE GATT，必须发现真实的 LE 随机地址。详见下文「连接策略」。
-
-## GAIA V3 包格式
-
-```
-[vendor 2B BE][commandValue 2B BE][payload...]
-```
-
-- `vendor = 0x001D`（Qualcomm）
-- `commandValue = (feature << 9) | (type << 7) | command`
-- type: `0 = COMMAND`, `1 = NOTIFICATION`, `2 = RESPONSE`
-
-示例：查询 ANC V2 当前模式（feature=32, cmd=3, type=COMMAND）
-```
-TX: 00 1D 40 03
-RX: 00 1D C0 03 <mode>
-```
-
-## 噪声控制
-
-### 三条 ANC 路径
-
-FxxkMoondrop 运行时自动探测耳机支持哪条 ANC 路径，不硬编码型号：
+| Device | Space Travel 2 / 太空漫游2 |
+| SoC | Bluetrum BT8932F |
+| ANC and battery | GAIA V3 over BLE |
+| Parametric EQ | 9ECA BleSourceSwitch over BLE |
+| Battery telemetry | Left and right earbuds; no charging-case value in the current GAIA path |
 
-| 路径 | Feature ID | 探测条件 | GET 命令 | SET 命令 |
-|---|---|---|---|---|
-| ANC V1 | 2 | BASIC 特性位图含 bit1 | cmd=1 (GET_ANC_STATE) | cmd=2 (SET_ANC_STATE) |
-| AudioCuration | 8 | BASIC 特性位图含 bit3 | cmd=3 (GET_CURRENT_MODE) | cmd=4 (SET_MODE) |
-| ANC V2 | 32 | BASIC 特性位图含 bit5 | cmd=3 (GET_CURRENT_MODE) | cmd=4 (SET_CURRENT_MODE) |
+## ANC mapping
 
-探测流程：连接成功 → 查询 `BASIC.GET_SUPPORTED_FEATURES` → 解析能力表判断 → 锁定 ancPath → 后续读写走该路径。断连和每次新 GATT 会话均重置探测状态并超时自愈重发。
 
-> ⚠️ 能力响应有**两种封装**，解析时必须都认（3.0.3 修正）：
-> 1. **特征对列表**（官方 GAIA SDK 格式，反编译 `GetSupportedFeaturesData`：
->    `byte0 = hasMoreData(0/1)`，其后每 2 字节一组 `featureId | version`；长度恒为奇数）。布丁实测 23 字节：
->    `00 | 00 02 | 01 01 | 05 01 | 0D 01 | 0E 01 | 0F 01 | 10 01 | 13 01 | 14 01 | 16 01 | 20 01`
->    → feature = BASIC / 电量 0x0D / 增益 0x0F / 指示灯 0x13 / **ANC_V2 0x20**（无 AudioCuration、无空间音频）。
-> 2. **32 位位图**（长度恒为 4 的倍数，GA2 等老固件；bit 序号 = feature id）。
->
-> 旧实现只认第 2 种，把布丁的 23 字节响应判成「位图截断」并弃用，导致 `ancPath` 永远是 UNKNOWN、
-> ANC 命令在发送前就被拦下（issue #4 复测现象「降噪点了没反应」）。判别只看长度奇偶即可，无歧义。
+The device profile in AncProfileLib has been hardware-tested with different SET and GET mappings.
 
-### GA2 实测 ANC 设备码映射
+| UI mode | UI value | SET device value | GET device value |
+|---|---:|---:|---:|
+| Off | 0 | 1 | 0 |
+| Noise cancellation | 1 | 2 | 1 |
+| Transparency | 2 | 4 | 2 |
+| Wind | 3 | 3 | 3 |
 
-> ⚠️ SET 和 GET 的映射**不同**！这是 GA2 固件的特殊行为，直接使用 AudioCuration 名义编码会导致按钮错乱。
+Do not replace this with the nominal UI order. The SET mapping is deliberately not identical to GET.
 
-**SET 方向（UI → 设备码）：**
+## Sound gain
 
-| UI 模式 | 设备码 |
-|---|---|
-| 关闭 | 1 |
-| 降噪 | 2 |
-| 透传 | 4 |
-| 抗风 | 3 |
 
-**GET 方向（设备码 → UI）：**
+The three UI levels map to device values as follows:
 
-固件读回是 **0-based** 直传，与 SET 的 1-based 枚举不同：
 
-| 设备码 | UI 模式 |
-|---|---|
-| 0 | 关闭 |
-| 1 | 降噪 |
-| 2 | 透传 |
-| 3 | 抗风 |
+| UI level | Device value |
+|---|---:|
+| Low | 2 |
+| Medium | 1 |
+| High | 0 |
 
-### ANC V2 模式枚举（官方 App AncV2Handler）
+## 9ECA PEQ boundary
 
-| 模式 | 值 |
-|---|---|
-| OFF | 0 |
-| ON | 1 |
-| TRANSPARENT | 2 |
-| ANTI_WIND | 3 |
-| ADAPTIVE | 4 |
-| LIVE | 5 |
 
-### AudioCuration 高级命令
+The 9ECA protocol implementation supports firmware capability reads, PEQ configuration reads, PEQ point reads and SET/commit commands. The wire representation contains the point index, frequency, signed raw gain, raw Q and filter ID. The pre-gain response is documented by the protocol layer in 0.01 dB units.
 
-除了基本的 GET/SET_MODE，AudioCuration 还包含丰富的子功能（部分 GA2 不稳定支持）：
+This branch does not yet contain a real-device-verified Space Travel 2 PEQ write/commit/read-back sequence. As a safety measure, the editor allows only local draft edits and keeps Apply disabled. Raw point gain and Q are shown as raw values until their units are confirmed for this model.
 
-| 命令 | ID | 说明 |
-|---|---|---|
-| GET_AC_STATE | 0 | AC 开关状态 |
-| SET_AC_STATE | 1 | 设置 AC 开关 |
-| GET_MODES_COUNT | 2 | 可用模式数 |
-| GET_CURRENT_MODE | 3 | 当前模式 ← **GA2 稳定** |
-| SET_MODE | 4 | 设置模式 ← **GA2 稳定** |
-| GET_GAIN | 5 | 透传增益 |
-| SET_GAIN | 6 | 设置透传增益 |
-| GET_TOGGLE_CONFIGURATION | 8 | 触控切换配置 |
-| SET_TOGGLE_CONFIGURATION | 9 | 设置触控切换 |
-| GET_WIND_NOISE_DETECTION_STATE | 23 | 风噪检测状态 |
-| SET_WIND_NOISE_DETECTION_STATE | 24 | 设置风噪检测 |
-| GET_CURRENT_ANC_SWITCH_CONF | 41 | 当前 ANC 切换配置 ← **GA2 对此回包不稳定，不推荐** |
-| SET_ANC_SWITCH_CONF | 42 | 设置 ANC 切换配置 |
-
-> 踩坑：GA2 对 cmd=41 (GET_CURRENT_ANC_SWITCH_CONF) 回包不稳定，会导致 ancPath 卡死在 -1。alpha2.25 回退到 cmd=3 (GET_MODE) 解决。
-
-### 型号档案库（AncProfileLib）
-
-档案按**设备名关键字**匹配（大写 `contains`）。未命中型号一律回退默认映射（AC 名义编码 1=关 / 2=降噪 / 3=透传 / 4=抗风）；用户可在设置页自定义映射，优先级最高。
-
-库内共 4 张表，按协议路径分工：
-
-| 表 | 适用路径 | 已入库型号 |
-|---|---|---|
-| `PROFILES` | AudioCuration（AC）档位映射 | `GOLDEN AGES 2`、`SPACE TRAVEL 2` |
-| `ANC_V2_PROFILES` | ANC V2 档位映射 | `PUDDING` |
-| `DC_PROFILES` | 扩展控制能力（空间音频 / 增益 / 指示灯） | `GOLDEN AGES 2`、`PUDDING`、`SPACE TRAVEL 2`、`NEKOCAKE`、`PILL`、`MOCA`（后三者为预置待实测） |
-
-#### GA2（梦回2 / Golden Ages 2）
-2026-08-24 官方 App 抓包 + 08-25 真机双向实测。AC 路径：SET `[1,2,4,3]`（UI 关 / 降 / 透 / 抗 → 设备码 1 / 2 / 4 / 3）；GET `[0,1,2,3]` —— **固件读回是 0-based 直传，与 SET 枚举不同**，这是 GET / SET 必须分开配置的原因。
-扩展控制：支持空间音频 + 三档增益，无指示灯；增益 `gainMap=[2,1,0]`。
-
-#### SPACE TRAVEL 2（太空漫游2）
-alpha2.41.0 加入，2026-09-01 真机双向实测。BT8932F 蓝讯主控（9ECA），无空间音频、三档增益、无指示灯；ANC 走 AudioCuration 通道，映射 `[1,2,4,3]`（同 GA2）；增益 `gainMap=[2,1,0]`（设备码 0=高 / 1=中 / 2=低，**反向于恒等**，alpha2.41.5 修正）。
-
-#### PUDDING（布丁，MD-TWS-056）
-走 ANC V2（非 AC），5 档：UI `[关, 降, 透, 抗, 自适应]` → 设备码 `[0, 4, 2, 3, 1]`；GET 方向 `[0, 4, 2, 3, 1]`（0 关 / 1 自适应 / 2 透 / 3 抗 / 4 降）。扩展控制：三档增益（恒等 `[0,1,2]`）+ 指示灯，无空间音频。
-
-## 电量
-
-### GAIA V3 电量查询
+## Standalone app scope
 
-```
-TX: feature=13 (BATTERY), cmd=1 (GET_BATTERY_LEVELS), payload=[1, 2]
-```
-
-payload 中 `[1, 2]` 表示查询左耳(1)和右耳(2)。
-
-| Battery ID | 含义 |
-|---|---|
-| 1 | 左耳 |
-| 2 | 右耳 |
-| 3 | 充电盒 |
 
-回包中每个 byte 对应一个 batteryId 的电量百分比。GA2 实测仅返回左右耳，无充电盒。
-
-> GA2 不通过 Android 系统的 `BluetoothBattery` API 提供电量，必须走 GAIA 协议直读。
-
-## Moondrop 私有协议（9ECA0000 BleSourceSwitch）
-
-> 适用于中科蓝讯（Bluetrum）主控耳机（猫饼 NEKOCAKE / 太空漫游2 / 音乐胶囊等）。
-
-### BLE GATT 服务
-
-| 用途 | UUID |
-|---|---|
-| Service | `9eca0000-7f3a-4f32-9a38-a91b2c6e0100` |
-| Command（写入） | `9eca0001-...` |
-| Response（通知） | `9eca0002-...` |
-| Notification（通知） | `9eca0003-...` |
-| Capability（直读） | `9eca0004-...` |
-| Firmware Info（直读） | `9eca0005-...` |
-
-### 帧格式
-
-```
-[0xA5][0x01][frameType][commandId][seq][payloadLen][payload ≤ 14 bytes]
-```
-
-| 字段 | 说明 |
-|---|---|
-| Magic | `0xA5` 固定 |
-| Version | `0x01` 固定 |
-| frameType | 1=COMMAND, 2=RESPONSE, 3=NOTIFICATION |
-| seq | 序列号，请求与回包匹配 |
-| payloadLen | 最大 14 字节 |
-
-### 命令列表
-
-| 命令 | ID | 说明 |
-|---|---|---|
-| GET_AUDIO_SOURCE | 1 | 查询当前音源 |
-| SET_AUDIO_SOURCE | 2 | 切换音源（sourceId + options + fadeSec） |
-| GET_CAPABILITY | 3 | 查询能力页 |
-| GET_FW_VERSION | 4 | 查询固件版本 |
-| GET_DEVICE_VOLUME | 5 | 查询设备音量 |
-| SET_DEVICE_VOLUME | 6 | 设置音量（left, right, mute） |
-| GET_PRESET_EQ | 7 | 查询预设 EQ 列表 |
-| SET_PRESET_EQ | 8 | 设置预设 EQ |
-| GET_PEQ_CONFIG | 9 | 查询 PEQ 配置 |
-| SET_PEQ_PREGAIN | 10 | 设置 PEQ 前置增益 |
-| GET_PEQ_POINT | 11 | 查询 PEQ 点 |
-| SET_PEQ_POINT | 12 | 设置 PEQ 点 |
-| COMMIT_PEQ | 13 | 提交 PEQ |
-| GET_MIC_GAIN | 14 | 查询麦克风增益 |
-| SET_MIC_GAIN | 15 | 设置麦克风增益 |
-| PING | 127 | 心跳 |
-
-### 音源 ID
-
-| 音源 | ID |
-|---|---|
-| 蓝牙 | 0 |
-| USB 音频 | 1 |
-| 2.4G 无线 | 2 |
-| AUX Line-In | 3 |
-| 光纤 SPDIF | 4 |
-| 同轴 Coaxial | 5 |
-| HDMI ARC | 6 |
-| 本地播放 | 7 |
-| 自动选择 | 127 |
-| 无信号 | 254 |
-
-### 9ECA 与 GAIA 共存
-
-9ECA 服务和 GAIA 服务可以在同一个 GATT 连接中并存。FxxkMoondrop 连接后同时探测两种服务，存在 9ECA 则初始化 `BleSourceSwitchClient` 复用同一 GATT 连接。两条协议互不干扰。
-
-## 连接策略
-
-### 双地址问题
-
-GA2（DUAL 模式）存在两个蓝牙地址：
-- **PUBLIC 地址**：系统配对使用的地址，走 Classic BT profile（A2DP/HFP）
-- **LE 随机地址**：BLE GATT 通信必须使用的地址
-
-系统 `BluetoothAdapter.getBondedDevices()` 返回的是 PUBLIC 地址，直接用它发起 GATT 连接会等待后台广播超时。
-
-### 动态 LE 地址发现
-
-FxxkMoondrop 不硬编码任何 LE 地址，采用自愈闭环：
-
-```
-无缓存 → 请求 GMS 扫描 → GMS BLE 扫描发现耳机 LE 地址 → 推送给应用
-→ 连接成功 → 写回缓存文件/SharedPreferences → 下次秒连
-→ 地址变化自动重新发现
-```
-
-### GMS 扫描注入（LSPosed 模块）
-
-LSPosed 模块 Hook `com.google.android.gms` 进程，注入 BroadcastReceiver 接收应用的扫描请求广播。收到请求后调用 GMS 自身的 `BluetoothLeScanner` 进行 BLE 扫描，按设备名过滤结果，将发现的 LE 地址回传给应用。
-
-扫描节流：30 秒内仅允许一次扫描请求，防止频繁唤醒。
-
-扫描结果按名称匹配 `moondrop` 关键字（不区分大小写），命中后持久化到应用私有目录。
-
-## Fast Pair 弹窗集成
-
-### Google Fast Pair 半屏弹窗
-
-通过 Hook GMS 的 `HalfSheetActivity`，注入自定义设备名和图标：
-
-1. Hook `dtes.f(Context)` 方法——修改设备名字段（`dtok.l` / `dtok.i`）
-2. Hook `dthi.O(ImageView, dtok)` 方法——注入自定义设备图标 Bitmap
-3. Hook `HalfSheetActivity` 生命周期——在弹窗显示后注入 ANC 控制按钮
-
-### 应用自带悬浮卡片（已经废弃，代码与权限均已移除）
-
-早期方案：不依赖 Xposed，通过 `WindowManager` 添加 `TYPE_APPLICATION_OVERLAY` 窗口。
-
-**现状**：该路径已完全废弃并删除，设置页也从未保留「切换两种模式」的入口。随之而来的 `SYSTEM_ALERT_WINDOW` 权限声明已在 3.0 **从清单移除**（本模块不创建任何悬浮窗，弹窗是 GMS 进程内的既有窗口，受 GMS 自身权限约束），权限检测页的对应检查项一并删除。
-
-## LSPosed 模块架构
-
-### 入口
-
-- 入口类：`com.fxxkmoondrop.secret.XposedEntry`
-- 继承 `XposedModule`（libxposed API 102，LSPosed ≥ 2.1.1）
-- 资源声明：`META-INF/xposed/{java_init.list, module.prop, scope.list}`
-
-### 作用域
-
-模块的 LSPosed **启用作用域只有两项**（`scope.list` 的内容）：
-
-| 包名 | 用途 |
-|---|---|
-| `com.google.android.gms` | Fast Pair 弹窗注入 + BLE 扫描能力借道 |
-| `com.android.settings` | 设置页注入耳机入口 + 蓝牙设备详情页控制面板 |
-
-下面两个包**不是作用域**，模块不会被注入其中，对应代码为预留（当前不执行）：
-
-| 包名 | 预留用途 | 状态 |
-|---|---|---|
-| `com.android.bluetooth` | A2DP 连接状态监听（连接拉起 / 断开停止） | 未启用 |
-| `com.moondroplab.moondrop.moondrop_app` | 逆向参考官方 App 的 ANC 控制路径 | 未启用 |
-
-### 模块功能
-
-| Hook 目标 | 功能 |
-|---|---|
-| GMS `dtes.f` | 修改弹窗设备名 |
-| GMS `dthi.O` | 注入弹窗设备图标 |
-| GMS `HalfSheetActivity` | 弹窗内注入 ANC 按钮 |
-| Settings `AdvancedConnectedDeviceDashboardFragment` | 设置页注入耳机入口 |
-| Bluetooth A2DP 状态 | 连接时静默拉起 App / 断开时停止进程 |
-| Moondrop App `AncV2Handler` | 逆向参考官方 ANC 控制路径 |
-
-## 问题记录
-
-### 1. ANC 刷新跳回关闭（alpha2.23-2.29）
-
-现象：设置 ANC 模式后刷新，按钮状态跳回关闭。
-
-根因：`connectedDeviceName` 为空时 `AncProfileLib.resolve()` 回退默认映射，而 GA2 的默认映射与实测映射不同（3 和 4 颠倒）。GET 方向又是 0-based，与 SET 的 1-based 不同。
-
-修复：连接成功后确保 `connectedDeviceName` 正确赋值；GET/SET 双向映射分离。
-
-### 2. 能力探测卡死 ancPath=-1（alpha2.19）
-
-现象：首次连接后 ANC 完全不可用，`ancPath` 始终为 -1。
-
-根因：探测标志一旦设置永不重置，断连后重新连接时跳过探测。
-
-修复：断连和每次新 GATT 会话均重置探测状态，超时后自动重发探测命令。
-
-### 3. cmd=41 回包不稳定（alpha2.25）
-
-现象：使用 `GET_CURRENT_ANC_SWITCH_CONF` (cmd=41) 查询 ANC 状态时，GA2 回包不稳定。
-
-修复：回退到 `GET_MODE` (cmd=3)，GA2 对 cmd=3 回包稳定。
-
-### 4. 假连接（alpha2.18）
-
-现象：耳机已物理断开，但 App 仍显示「已连接」。
-
-根因：陈旧 GATT 缓存 + 双地址自我反馈（PUBLIC 地址连上 PUBLIC 地址）。
-
-修复：断连时清空所有缓存地址；连接成功后校验 GATT 服务是否包含 GAIA Service UUID。
-
-### 5. GA2 连接 12 秒超时（alpha2.20-2.21）
-
-现象：开盖后需 12 秒才连上，经常超时。
-
-根因：使用 bonded PUBLIC 地址发起 GATT 连接，等待后台广播超时后轮换。
-
-修复：优先使用已学习的 LE 随机地址；无缓存时通过 GMS 扫描发现真实 LE 地址。
-
-## 已知限制
-
-- GA2 无充电盒电量读取（GAIA 回包仅含左右耳）
-- 无增益控制和指示灯控制（GA2 固件未暴露相关 feature）
-- 9ECA 协议客户端已实现但未经实机验证
-- Fast Pair 弹窗依赖完整 GMS，ColorOS 需额外模块
-
----
-
-## 布丁 PUDDING（MD-TWS-056）适配
-
-> 基于 [PuddingPods](https://github.com/lingbai-rong/PuddingPods) 项目协议文档完成适配。
-
-### 连接方式
-
-布丁与 GA2 的关键区别在于**传输层**：
-
-| 项 | GA2 | 布丁 PUDDING |
-|---|---|---|
-| 传输 | BLE GATT | Classic BT RFCOMM / SPP |
-| 协议 | GAIA V3 | GAIA V4 |
-| UUID | `00001100-...`（GATT Service） | `00001101-0000-1000-8000-00805f9b34fb`（SPP） |
-| 双地址 | 是（PUBLIC + LE 随机） | 否（Classic BT 直连） |
-
-GAIA 包格式与 V3 相同：`[vendor 2B BE][commandValue 2B BE][payload...]`，`vendor = 0x001D`。
-
-### ANC 噪声控制
-
-布丁走 ANC V2 路径（feature=32 / 0x20），与 GA2 相同的 feature ID，但模式枚举更丰富（5 档）：
-
-**SET 方向（TX: `00 1D 40 04 <mode>`，RX: `00 1D 41 04 <mode>`）：**
-
-| 功能 | mode |
-|---|---|
-| 关闭 | 0x00 |
-| 自适应降噪 | 0x01 |
-| 通透 | 0x02 |
-| 抗风噪 | 0x03 |
-| 基础降噪 | 0x04 |
-
-> 与 GA2 的区别：GA2 仅 4 档（关/降噪/透传/抗风），布丁增加「自适应降噪」并将「基础降噪」独立为 0x04。
-
-### 电量
-
-布丁支持三路电量（含充电盒），GA2 仅左右耳：
-
-- 查询：`00 1D 1A 00` 或 `00 1D 1A 01 01 02`
-- 回包：`00 1D 1B ...`
-- 类型 1 = 左耳，类型 2 = 右耳，类型 3 = 充电盒
-- 单次回包缺少某组件时保留最近一次有效值
-
-### 增益控制
-
-| 命令 | 帧 |
-|---|---|
-| 查询 | `00 1D 1E 01` |
-| 设置 | `00 1D 1E 02 <level>` |
-
-level: 0x00 = 低, 0x01 = 中, 0x02 = 高
-
-### 指示灯控制
-
-| 命令 | 帧 |
-|---|---|
-| 查询 | `00 1D 26 01` |
-| 设置 | `00 1D 26 02 <state>` |
-
-state: 0x00 = 关, 0x01 = 开
-
-### AncProfileLib 档案
-
-布丁在 `AncProfileLib.PROFILES` 中需添加独立条目，SET 映射为 5 档枚举：
-
-```
-UI[关, 降, 透, 抗, 自适应] → dev: [0, 4, 2, 3, 1]
-```
-
-> 注意布丁的 ANC 模式数（5）超过 GA2（4），UI 侧需适配第 5 档「自适应」按钮。
+The user-facing app is limited to the Space Travel 2 device page, its tested ANC and gain controls, battery and notification/background settings, theme/language, and the 9ECA PEQ reader/editor. Root, Xposed/LSPosed, GMS Fast Pair injection and Android Settings injection are not part of this branch.

@@ -8,7 +8,6 @@ import java.util.UUID
  */
 object GaiaConstants {
     const val TAG = "GaiaBleClient"
-    const val PKG_GMS = "com.google.android.gms"
     const val GATT_PENDING_TIMEOUT_MS = 12000L
 
     /**
@@ -72,8 +71,4 @@ object GaiaConstants {
     const val BATTERY_RIGHT = 2
     const val BATTERY_CASE = 3
 
-    // Broadcast actions
-    const val ACTION_LE_ADDR_FOUND = "com.fxxkmoondrop.secret.ACTION_LE_ADDR_FOUND"
-    const val ACTION_REQ_LE_SCAN = "com.fxxkmoondrop.secret.ACTION_REQ_LE_SCAN"
-    const val EXTRA_LE_ADDR = "addr"
 }

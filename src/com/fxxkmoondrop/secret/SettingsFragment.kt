@@ -1,1194 +1,214 @@
 package com.fxxkmoondrop.secret
 
-import android.app.Activity
-import android.content.Context
 import android.content.Intent
-import android.content.res.ColorStateList
-import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
-import android.graphics.drawable.RippleDrawable
-import android.net.Uri
 import android.os.Bundle
-import android.provider.Settings
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.view.Window
-import android.widget.EditText
-import android.widget.FrameLayout
-import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import android.widget.Toast
 import androidx.fragment.app.Fragment
-import com.google.android.material.button.MaterialButton
-import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.card.MaterialCardView
 import com.google.android.material.materialswitch.MaterialSwitch
-import androidx.lifecycle.LifecycleOwner
 
 /**
- * alpha1.35: 设置&关于 —— 整页二级界面（替代原 Dialog 浮窗）。
- * Material You 动态取色 + 深浅色自适应（ThemeUtil 与主界面同色板）。
+ * Minimal settings for the standalone MoonEar companion.
+ *
+ * Legacy module, injection, popup, simulation and diagnostic controls do not
+ * belong in this app and are intentionally not exposed here.
  */
-@Suppress("DEPRECATION")
 class SettingsFragment : Fragment() {
-
     private lateinit var pal: ThemeUtil.Palette
-    private var statusBarH = 0
-    private var simConnBtn: MaterialButton? = null
-    private val simRestoreHandler = android.os.Handler(android.os.Looper.getMainLooper())
-    private val simRestoreRunnable = object : Runnable {
-        override fun run() {
-            simRestoreHandler.removeCallbacks(this)
-            if (!GaiaBleClient.isSimConnected()) return
-            GaiaBleClient.setSimConnected(false)
-            BatteryStore.clearGaia(SIM_MAC)
-            PopupGate.clear(SIM_MAC, SIM_NAME)
-        }
-    }
-    /**
-     * alpha2.54: 主题重建统一入口。
-     *
-     * 原实现是在 OnCheckedChangeListener 里直接
-     *   Handler().postDelayed({ requireActivity().recreate() }, 350/550)
-     * 有三个问题叠加，反复开关动态取色 / AMOLED 时必崩：
-     *   1. 没有任何取消机制 —— 连点会排出多个 recreate，多次全量重建叠加；
-     *   2. 回调里用 requireActivity()，而延迟期间 Fragment 可能已 detach，
-     *      抛 IllegalStateException: Fragment not attached to an activity；
-     *   3. 没有生命周期清理，视图销毁后回调照跑。
-     *
-     * 这里用「先 removeCallbacks 再 post」把连续请求合并成一次，
-     * 并在真正执行前用 isAdded / activity 双检，任一不满足就静默跳过。
-     */
-    private val rebuildHandler = android.os.Handler(android.os.Looper.getMainLooper())
-    private val rebuildRunnable: Runnable = object : Runnable {
-        override fun run() {
-            rebuildHandler.removeCallbacks(this)
-            val act = activity
-            if (isAdded && act != null && !act.isFinishing) act.recreate()
-        }
-    }
+    private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
-    private fun scheduleRebuild(delayMs: Long) {
-        rebuildHandler.removeCallbacks(rebuildRunnable)
-        rebuildHandler.postDelayed(rebuildRunnable, delayMs)
-    }
-
-    private var runModeNameTv: TextView? = null    // 运行模式行的模式名（模块探测落定后就地刷新）
-    private var runModeDetailTv: TextView? = null  // 运行模式行的说明
-
-    private var seedRow: LinearLayout? = null // alpha2.8: 种子颜色行（动态取色关闭时显示；出现/消失动画）
-
-    override fun onCreateView(inflater: LayoutInflater, containerView: ViewGroup?,
-                              savedInstanceState: Bundle?): View? {
-        super.onCreateView(inflater, containerView, savedInstanceState)
+    override fun onCreateView(
+        inflater: LayoutInflater,
+        container: ViewGroup?,
+        state: Bundle?
+    ): View {
         Lang.refresh(requireContext())
         pal = ThemeUtil.Palette(requireContext())
+        val prefs = requireContext().getSharedPreferences("cfg", 0)
 
-        // alpha1.36: 窗口背景=surface + 系统栏透明（顶部完全铺满，无空白带；深浅色自适应）
-        val resId = resources.getIdentifier("status_bar_height", "dimen", "android")
-        if (resId > 0) statusBarH = resources.getDimensionPixelSize(resId)
-
-        val root = LinearLayout(requireContext())
-        root.orientation = LinearLayout.VERTICAL
-        root.setBackgroundColor(pal.surface)
-        root.setPadding(0, statusBarH, 0, 0)
-
-        // alpha2.53: M3 LargeTopAppBar —— 大标题居上不动，内容从下方穿过，下翻时标题收缩（对齐官方）
-        val page = M3Ui.largeHeaderPage(requireActivity(), pal, Lang.t("设置", "Settings"))
-
-        // ── 内容（可滚动）──
-        val sv = page.sv
-        val box = LinearLayout(requireContext())
-        box.orientation = LinearLayout.VERTICAL
-        box.setPadding(dp(16), 0, dp(16), dp(24))
-
-        // 本页这几项（官方集成 / 弹窗图标）由 GMS 进程里的 Hook 承担，
-        // 与 App 自身有没有 root **无关**：没 root 但 LSPosed 模块已启用 = 照常可用。
-        // 因此只在 Hook **确定**未激活时才置灰；尚未探测（null）不置灰，
-        // 否则一进设置页就没 root 把功能整片禁掉（3.0.5 的问题）。
-        val hookOff = !EnvProbe.hookUsable()
-
-        // ── 运行模式（单独一块，只展示当前环境，不掺别的设置项）──
-        //   三态由「有无可用 root 入口」×「FastPairHook 模块是否已激活」决定：
-        //   Root 模式 / 模块模式（无 root 但模块激活）/ 无 Root 模式。
-        //   模块未探测时显示「检测中…」，探测落定后（见本函数末尾）就地刷新这一行。
-        box.addView(M3Ui.sectionTitle(requireActivity(), pal, Lang.t("运行模式", "Run mode")))
-        // 3.2.10: 这一行可点 = 重查一次（与权限页「重新检查」同一语义）。
-        // 此前是纯展示行：模块判负后会一直挂着「未激活」，用户在这里无从恢复。
-        val rowRunMode = M3Ui.listRow(requireActivity(), pal, R.drawable.ic_info,
-                EnvProbe.runModeName(requireContext()), EnvProbe.runModeDetail(requireContext()),
-                null, Runnable { recheckRunMode() })
-        listRowLabels(rowRunMode)?.let { (nameTv, detailTv) ->
-            runModeNameTv = nameTv
-            runModeDetailTv = detailTv
+        val scroll = ScrollView(requireContext()).apply {
+            setBackgroundColor(pal.surface)
+            clipToPadding = false
+            setPadding(dp(20), dp(18), dp(20), dp(32))
         }
-        box.addView(M3Ui.groupCard(requireActivity(), pal, rowRunMode))
-        box.addView(spacer(dp(14)))
-
-        box.addView(M3Ui.sectionTitle(requireActivity(), pal, Lang.t("外观", "Appearance")))
-
-        val appear = LinearLayout(requireContext())
-        appear.orientation = LinearLayout.VERTICAL
-
-        // 3.3.2: 外观项收束成一个入口 —— 主题 / 强调色 / 色彩规范 / 调色板风格 / 界面缩放
-        // 全部搬进「主题设置」二级页（对齐 LSPosed 的结构），设置页只留一行。
-        val themeEntry = M3Ui.navRow(requireActivity(), pal,
-                R.drawable.ic_settings,
-                Lang.t("主题设置", "Theme settings"),
-                null,
-                Runnable {
-                    startActivity(android.content.Intent(requireContext(), ThemeSettingsActivity::class.java))
-                })
-
-        // 语言：区域设置与主题同类 → 与 主题 / 动态取色 / AMOLED 放进**同一张卡**（同一分组）。
-        val langRow = M3Ui.dropdownRow(requireActivity(), pal, "语言 / Language",
-                Lang.t("应用界面语言", "App interface language"),
-                arrayOf("跟随系统", "中文", "English"), Lang.mode(requireContext())) { mi ->
-            getSP().edit().putInt("lang", mi).commit()
-            scheduleRebuild(0L)
+        val content = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
         }
-        appear.addView(spacer(dp(12)))
-        appear.addView(
-            M3Ui.groupCard(requireActivity(), pal, themeEntry, langRow),
-            LinearLayout.LayoutParams(-1, -2),
+        scroll.addView(content, ViewGroup.LayoutParams(-1, -2))
+
+        content.addView(TextView(requireContext()).apply {
+            text = "Settings"
+            textSize = 32f
+            typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
+            setTextColor(pal.onSurface)
+        })
+        content.addView(TextView(requireContext()).apply {
+            text = "Make MoonEar work the way you prefer."
+            textSize = 14f
+            setTextColor(pal.onVariant)
+        }, LinearLayout.LayoutParams(-1, -2).also {
+            it.topMargin = dp(4)
+            it.bottomMargin = dp(12)
+        })
+
+        section(content, "Appearance")
+        content.addView(
+            navigationCard(
+                "Theme and colours",
+                "Dynamic colour, light and dark appearance"
+            ) {
+                startActivity(Intent(requireContext(), ThemeSettingsActivity::class.java))
+            }
         )
-        box.addView(appear, LinearLayout.LayoutParams(-1, -2))
-        box.addView(spacer(dp(14)))
 
-        // ── 检查权限 / 日志抓取 / 弹窗图标：官方分组卡片 ──
-        val rowPerm = M3Ui.listRow(requireActivity(), pal, R.drawable.ic_shield, Lang.t("检查权限", "Check permissions"),
-                Lang.t("蓝牙、通知、电池白名单与模块环境",
-                        "Bluetooth, notifications, battery allowlist and module environment"),
-                M3Ui.chevron(requireActivity(), pal.onVariant)) {
-            requireActivity().startActivity(Intent(requireContext(), PermissionActivity::class.java))
-        }
-        val rowLog = M3Ui.listRow(requireActivity(), pal, R.drawable.ic_description, Lang.t("日志抓取（设备适配）", "Log capture (device adaptation)"),
-                Lang.t("收集设备信息与运行日志并导出 ZIP", "Collect device info and runtime logs into a ZIP"),
-                M3Ui.chevron(requireActivity(), pal.onVariant)) { showLogDialog() }
-        val iconState = TextView(requireContext())
-        iconState.textSize = 14f
-        iconState.setTextColor(pal.primary)
-        iconState.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-        // alpha2.53: 检查是异步的（读私有目录），等待期间显示圆形加载指示，避免行上先空一截再突然出字
-        val iconSlot = FrameLayout(requireContext())
-        val iconSpin = M3Ui.circularLoader(requireContext(), 18, pal.primary)
-        iconState.visibility = View.GONE
-        // 「恢复默认」直接放在这一行右侧（有自定义图标时才出现），不再藏进二级弹窗。
-        // 官方 M3 Text Button，不再是手绘 TextView + 自贴涟漪
-        val restoreBtn = M3Ui.textActionButton(requireContext(), pal,
-                Lang.t("恢复默认", "Restore")) {
-            resetCustomIcon()
-            it.visibility = View.GONE
-            iconState.text = Lang.t("默认", "Default")
-        }
-        restoreBtn.visibility = View.GONE
-        val iconTrail = LinearLayout(requireContext())
-        iconTrail.orientation = LinearLayout.HORIZONTAL
-        iconTrail.gravity = Gravity.CENTER_VERTICAL
-        iconTrail.addView(iconState, LinearLayout.LayoutParams(-2, -2))
-        iconTrail.addView(restoreBtn, LinearLayout.LayoutParams(-2, -2))
-        iconSlot.addView(iconTrail, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
-        iconSlot.addView(iconSpin, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
-        val showIconState: (Boolean) -> Unit = { exists ->
-            iconSpin.visibility = View.GONE
-            iconState.text = if (exists) Lang.t("已自定义", "Custom") else Lang.t("默认", "Default")
-            iconState.visibility = View.VISIBLE
-            restoreBtn.visibility = if (exists) View.VISIBLE else View.GONE
-        }
-        iconCustomExistsAsync(showIconState)
-        // 自定义图标由 GMS 进程内的 Hook 读取（readIconBytes，经 PrefsProvider）：
-        // 只要 LSPosed 模块激活就能用，不需要 App 有 root —— 仅模块未激活时置灰并说明。
-        val iconRow = M3Ui.listRow(requireActivity(), pal, R.drawable.ic_image, Lang.t("弹窗图标", "Popup icon"),
-                if (hookOff)
-                    Lang.t("需要 FastPairHook 模块",
-                            "Requires the FastPairHook module")
-                else
-                    Lang.t("Google 弹窗显示的耳机图标",
-                            "Earbud icon shown in the Google popup"),
-                iconSlot) {
-            pickIcon()
-        }
-        if (hookOff) {
-            iconRow.isEnabled = false
-            iconRow.alpha = 0.4f
-            iconRow.setOnClickListener(null)
-            iconSlot.visibility = android.view.View.GONE
-        }
-        val rowIcon = iconRow
-        box.addView(spacer(dp(10)))
-
-        // 「行为」这个筐太杂（官方集成 / 通知 / 保活 / 后台 / 界面元素混在一起），
-        // 改名「功能」，只留真正影响耳机功能与界面呈现的开关。
-        box.addView(M3Ui.sectionTitle(requireActivity(), pal, Lang.t("功能", "Features")))
-
-        // ── 第 3 项：分类功能开关 ──
-        //  每个开关对应一条真实生效的链路：关掉后相应 hook / 通知即停用（跨进程读同一个 SP）。
-        //  默认全开，保持既有行为不变。
-        if (hookOff) {
-            box.addView(makeSubLabel(Lang.t(
-                "FastPairHook 模块未激活，以下集成项不可用",
-                "FastPairHook module inactive; the integrations below are unavailable")))
-        }
-        // ⛔ 3.3.1: 小米集成整块隐藏（用户决定 A2）。
-        // 未在真机验证过，且在非小米设备上只显示一行置灰说明、白占一屏。
-        // 代码全部保留，恢复 = 把 XiaomiProbe.INTEGRATION_ENABLED 改回 true。
-        if (XiaomiProbe.INTEGRATION_ENABLED) {
-            // ── 小米 / HyperOS 系统集成（3.2.13）────────────────────────────
-            // 门禁：非小米设备上整组置灰并给出原因，不提供开关。
-            // 与「模块未激活」不同，这里**不隐藏**分组 —— 用户需要看到
-            // 「为什么我的手机上没有这一项」，静默消失会让人以为装漏了。
-            box.addView(makeSubLabel(Lang.t("小米系统集成", "Xiaomi integration")))
-            val isXiaomi = XiaomiProbe.isXiaomi()
-            if (!isXiaomi) {
-                box.addView(makeSubLabel(Lang.t(
-                    "未检测到小米 / HyperOS 设备（当前机型：${android.os.Build.BRAND}），以下集成不可用",
-                    "Not a Xiaomi/HyperOS device (brand: ${android.os.Build.BRAND}); unavailable")))
+        section(content, "Notifications")
+        content.addView(
+            toggleCard(
+                "Battery notifications",
+                "Show left and right earbud battery levels when available",
+                prefs.getBoolean("feat_notif_battery", true)
+            ) { enabled ->
+                prefs.edit().putBoolean("feat_notif_battery", enabled).apply()
+                DeviceNotif.refreshBattery(requireContext())
             }
-            val swXiaomi = makeTintedSwitch()
-            swXiaomi.isChecked = isXiaomi && getSP().getBoolean("feat_xiaomi_integration", true)
-            if (!isXiaomi) {
-                // 只灰不藏：如实反映「本机用不了」，同时让用户知道功能存在
-                swXiaomi.isEnabled = false
-                swXiaomi.isClickable = false
-                swXiaomi.alpha = 0.4f
+        )
+        content.addView(
+            toggleCard(
+                "Noise-control notification",
+                "Show ANC and transparency controls in the notification",
+                prefs.getBoolean("feat_notif_anc", true)
+            ) { enabled ->
+                prefs.edit().putBoolean("feat_notif_anc", enabled).apply()
+                DeviceNotif.refreshAnc(requireContext())
             }
-            val rowXiaomi = M3Ui.listRow(requireActivity(), pal, R.drawable.ic_tune,
-                    Lang.t("HyperOS 设备集成", "HyperOS device integration"),
-                    Lang.t("接入系统设备中心卡片、焦点岛与高级耳机页",
-                            "Integrate with device-center cards, Focus Island and the advanced headset page"),
-                    swXiaomi, null)
-            if (isXiaomi) {
-                swXiaomi.setOnCheckedChangeListener { _, checked ->
-                    getSP().edit().putBoolean("feat_xiaomi_integration", checked).commit()
+        )
+
+        section(content, "Background")
+        content.addView(
+            toggleCard(
+                "Background monitoring",
+                "Reconnect and refresh battery while the earbuds are in use",
+                KeepAlive.enabled(requireContext())
+            ) { enabled ->
+                KeepAlive.setEnabled(requireContext(), enabled)
+            }
+        )
+
+        section(content, "About")
+        content.addView(
+            navigationCard(
+                "MoonEar",
+                "A dedicated companion for Moondrop Space Travel 2"
+            ) {
+                runCatching {
+                    startActivity(
+                        Intent(
+                            Intent.ACTION_VIEW,
+                            android.net.Uri.parse("https://github.com/skray9403/FxxkMoondrop")
+                        )
+                    )
                 }
             }
-            if (!isXiaomi) {
-                rowXiaomi.isEnabled = false
-                rowXiaomi.alpha = 0.4f
-            }
-            box.addView(M3Ui.groupCard(requireActivity(), pal, rowXiaomi))
-            box.addView(spacer(dp(14)))
-        }
-
-        box.addView(makeSubLabel(Lang.t("官方集成", "Official integration")))
-        val swOfficial = makeTintedSwitch()
-        swOfficial.isChecked = if (hookOff) false else getSP().getBoolean("feat_official_panel", true)
-        if (hookOff) {
-            swOfficial.isEnabled = false
-            swOfficial.isClickable = false
-            swOfficial.alpha = 0.4f
-        }
-        val rowOfficial = M3Ui.listRow(requireActivity(), pal, R.drawable.ic_headphones,
-                Lang.t("官方降噪面板", "Official noise-control panel"),
-                Lang.t("把耳机状态接入 Google 官方降噪面板",
-                        "Feed headset state into Google's official noise-control panel"),
-                swOfficial, null)
-        if (!hookOff) {
-            swOfficial.setOnCheckedChangeListener { _, checked ->
-                getSP().edit().putBoolean("feat_official_panel", checked).commit()
-            }
-        }
-
-        val swDetail = makeTintedSwitch()
-        swDetail.isChecked = if (hookOff) false else getSP().getBoolean("feat_detail_panel", true)
-        if (hookOff) {
-            swDetail.isEnabled = false
-            swDetail.isClickable = false
-            swDetail.alpha = 0.4f
-        }
-        val rowDetail = M3Ui.listRow(requireActivity(), pal, R.drawable.ic_tune,
-                Lang.t("蓝牙详情页面板", "Bluetooth details panel"),
-                Lang.t("在系统蓝牙设备详情页注入降噪与功能控制卡片",
-                        "Inject the control card into the system Bluetooth device details page"),
-                swDetail, null)
-        if (!hookOff) {
-            swDetail.setOnCheckedChangeListener { _, checked ->
-                getSP().edit().putBoolean("feat_detail_panel", checked).commit()
-            }
-        }
-        // 详情页用哪种降噪面板：官方面板（Slice）还是我们自绘（与概览页同款按钮）。
-        // 默认自绘：UWU 这类 ROM 上官方切片拿不到内容，自绘才是可用的。
-        val styleSelfDraw = getSP().getBoolean("feat_detail_anc_selfdraw", true)
-        val rowPanelStyle = M3Ui.dropdownRow(requireActivity(), pal,
-                Lang.t("降噪面板样式", "Noise control panel style"),
-                Lang.t("自绘面板与概览页同款；官方面板依赖系统切片",
-                        "In-app panel matches the overview page; official panel relies on system slices"),
-                arrayOf(Lang.t("自绘降噪面板", "In-app panel"),
-                        Lang.t("系统官方面板", "Official panel")),
-                if (styleSelfDraw) 0 else 1) { mi ->
-            getSP().edit().putBoolean("feat_detail_anc_selfdraw", mi == 0).commit()
-            toast(Lang.t("重启蓝牙设置页后生效", "Takes effect after reopening Bluetooth settings"))
-        }
-        box.addView(M3Ui.groupCard(requireActivity(), pal, rowOfficial, rowDetail, rowPanelStyle))
-        box.addView(spacer(dp(14)))
-
-        // ── 连接弹窗 ──
-        // 总开关与四项时机同属一件事（什么时候弹这张卡片），原先分散在「官方集成」与
-        // 「弹窗时机」两个分块下，找一个开关要跨两处；现在收成一整块。
-        box.addView(makeSubLabel(Lang.t("连接弹窗", "Connection popup")))
-
-        // 弹窗由 GMS 进程的 Hook 承担，模块未激活时一并置灰
-        val swPopup = makeTintedSwitch()
-        swPopup.isChecked = if (hookOff) false else getSP().getBoolean("feat_popup", true)
-        if (hookOff) {
-            swPopup.isEnabled = false
-            swPopup.isClickable = false
-            swPopup.alpha = 0.4f
-        }
-        val rowPopup = M3Ui.listRow(requireActivity(), pal, R.drawable.ic_devices,
-                Lang.t("启用弹窗", "Show the popup"),
-                Lang.t("耳机连接时显示 Google Fast Pair 卡片", "Show the Google Fast Pair card on connect"),
-                swPopup, null)
-        if (!hookOff) {
-            swPopup.setOnCheckedChangeListener { _, checked ->
-                getSP().edit().putBoolean("feat_popup", checked).commit()
-            }
-        }
-
-        // 弹出时机：两选下拉。原先是开关（等耳机就绪），而「关」这个状态要读完副标题
-        // 才知道意思是「连上就弹」—— 下拉把两个选项都摆出来，一眼看清可选范围。
-        val timingLabels = arrayOf(Lang.t("等耳机就绪", "When the headset is ready"),
-                Lang.t("连接后立即", "Immediately on connect"))
-        val timingIdx = if (PopupGate.waitGaia(requireContext())) 0 else 1
-        val rowTiming = M3Ui.dropdownRow(requireActivity(), pal,
-                Lang.t("弹出时机", "Show when"),
-                Lang.t("等左右耳电量就绪后再显示", "Show after the battery readings are ready"),
-                timingLabels, timingIdx) { mi ->
-            getSP().edit().putBoolean("popup_wait_gaia", mi == 0).commit()
-        }
-
-        // 延迟用下拉而不是开关 + 数值：可选项就 4 个，下拉一步到位，也跟「主题」「语言」一致
-        val delayLabels = arrayOf(Lang.t("不延迟", "No delay"), "1 s", "2 s", "5 s")
-        val delayIdx = when (PopupGate.delaySec(requireContext())) {
-            1 -> 1
-            2 -> 2
-            5 -> 3
-            else -> 0
-        }
-        val rowDelay = M3Ui.dropdownRow(requireActivity(), pal,
-                Lang.t("延迟弹出", "Delay"),
-                Lang.t("连接后延迟显示", "Show after a delay once connected"),
-                delayLabels, delayIdx) { mi ->
-            val sec = when (mi) {
-                1 -> 1
-                2 -> 2
-                3 -> 5
-                else -> 0
-            }
-            getSP().edit().putInt("popup_delay_sec", sec).commit()
-        }
-
-        val swSkipLock = makeTintedSwitch()
-        swSkipLock.isChecked = PopupGate.skipLocked(requireContext())
-        val rowSkipLock = M3Ui.listRow(requireActivity(), pal, R.drawable.ic_devices,
-                Lang.t("锁屏时不弹出", "Skip on the lock screen"),
-                Lang.t("锁屏时不显示弹窗", "Do not show the popup while the screen is locked"),
-                swSkipLock, null)
-        swSkipLock.setOnCheckedChangeListener { _, checked ->
-            getSP().edit().putBoolean("popup_skip_locked", checked).commit()
-        }
-
-        val swSkipLand = makeTintedSwitch()
-        swSkipLand.isChecked = PopupGate.skipLandscape(requireContext())
-        val rowSkipLand = M3Ui.listRow(requireActivity(), pal, R.drawable.ic_devices,
-                Lang.t("横屏时不弹出", "Skip in landscape"),
-                Lang.t("横屏时不显示弹窗", "Do not show the popup in landscape"),
-                swSkipLand, null)
-        swSkipLand.setOnCheckedChangeListener { _, checked ->
-            getSP().edit().putBoolean("popup_skip_landscape", checked).commit()
-        }
-
-        // 模块未激活时弹窗永不出现，调时机没有意义 —— 与上面的总开关同待遇。
-        // （总开关关掉（用户偏好）时刻意不灰：先配好时机再开总开关是正常用法；
-        //   而模块未激活是环境问题，灰掉才如实反映「这几项现在不起作用」。）
-        if (hookOff) {
-            // 两行下拉：监听挂在行上，置空即可
-            for (r in arrayOf(rowTiming, rowDelay)) {
-                r.isEnabled = false
-                r.alpha = 0.4f
-                r.setOnClickListener(null)
-            }
-            // 两行开关：**开关是作为 trailing 塞进行里的独立控件**，
-            // row.isEnabled = false 传不过去 —— 只灰行的话，开关照样能拨动，
-            // 在无模块环境里表现为「显示已禁用却还能点」。必须禁用开关自身。
-            for (r in arrayOf(rowSkipLock, rowSkipLand)) {
-                r.isEnabled = false
-                r.alpha = 0.4f
-            }
-            for (sw in arrayOf(swSkipLock, swSkipLand)) {
-                sw.isEnabled = false
-                sw.isClickable = false
-            }
-        }
-        box.addView(M3Ui.groupCard(requireActivity(), pal,
-                rowPopup, rowIcon, rowTiming, rowDelay, rowSkipLock, rowSkipLand))
-        box.addView(spacer(dp(14)))
-
-        box.addView(makeSubLabel(Lang.t("通知", "Notifications")))
-        val swNotifBatt = makeTintedSwitch()
-        swNotifBatt.isChecked = getSP().getBoolean("feat_notif_battery", true)
-        val rowNotifBatt = M3Ui.listRow(requireActivity(), pal, R.drawable.ic_battery_full,
-                Lang.t("电量通知", "Battery notification"),
-                Lang.t("常驻通知显示左右耳电量",
-                        "Persistent notification with left and right battery levels"),
-                swNotifBatt, null)
-        swNotifBatt.setOnCheckedChangeListener { _, checked ->
-            getSP().edit().putBoolean("feat_notif_battery", checked).commit()
-            // 即时生效：refreshBattery 内部会按开关取消/重建（GAIA 未连时什么都不做）
-            DeviceNotif.refreshBattery(requireContext())
-        }
-
-        val swNotifAnc = makeTintedSwitch()
-        swNotifAnc.isChecked = getSP().getBoolean("feat_notif_anc", true)
-        val rowNotifAnc = M3Ui.listRow(requireActivity(), pal, R.drawable.ic_anc_on,
-                Lang.t("通知内降噪控制", "ANC control in notification"),
-                Lang.t("通知栏提供降噪档位按钮",
-                        "Noise-control buttons in the notification shade"),
-                swNotifAnc, null)
-        swNotifAnc.setOnCheckedChangeListener { _, checked ->
-            getSP().edit().putBoolean("feat_notif_anc", checked).commit()
-            DeviceNotif.refreshAnc(requireContext())
-        }
-        box.addView(M3Ui.groupCard(requireActivity(), pal, rowNotifBatt, rowNotifAnc))
-        box.addView(spacer(dp(14)))
-
-
-        // Background monitoring no longer changes battery exemptions through root.
-
-        // ── 后台隐藏 ──
-        val swBg = makeTintedSwitch()
-        swBg.isChecked = getSP().getBoolean("bg_hide", false)
-        val rowBg = M3Ui.listRow(requireActivity(), pal, R.drawable.ic_visibility_off, Lang.t("后台隐藏", "Hide in background"),
-                Lang.t("切到后台时隐藏主界面",
-                        "Hide the main UI when the app goes to the background"), swBg, null)
-        swBg.setOnCheckedChangeListener { _, checked ->
-            getSP().edit().putBoolean("bg_hide", checked).commit()
-        }
-
-        // ── 后台监听总开关（alpha2.41.10: 合并原主界面「开始/停止后台监听」按钮）──
-        val swAuto = makeTintedSwitch()
-        // 总开关状态 = enable && auto_service，两键始终同步写入
-        swAuto.isChecked = KeepAlive.enabled(requireContext())
-        val rowAuto = M3Ui.listRow(requireActivity(), pal, R.drawable.ic_sensors, Lang.t("后台监听", "Background monitor"),
-                Lang.t("启动与开机自动恢复，连接后直连 GAIA",
-                        "Resume on launch and boot; connect to GAIA when a headset is present"), swAuto, null)
-        swAuto.setOnCheckedChangeListener { _, checked ->
-            KeepAlive.setEnabled(requireContext(), checked)
-        }
-
-
-                // ── 自定义映射（alpha2.52：降噪 / 增益 / 追踪标签 三块合并为一组，
-        //    小标题分级，避免三个同级 section 把设置页切得太碎）──
-        box.addView(M3Ui.sectionTitle(requireActivity(), pal, Lang.t("自定义映射", "Custom Mapping")))
-        box.addView(makeSubLabel(Lang.t("降噪按钮", "Noise-control buttons")))
-        val ancProfileDevice = GaiaBleClient.getInstance().getConnectedDeviceName()
-        val ancMapProfile = AncProfileLib.matchedProfileName(ancProfileDevice)
-        val ancMapState = mapStateLine("")
-
-        val ancMapHint = TextView(requireContext())
-        // alpha2.53: 文案对齐下拉交互（原来写的是「手动修改」的输入框说法）
-        ancMapHint.text = Lang.t("各档位对应的设备码（0-5）",
-                "Device code (0-5) for each level")
-        ancMapHint.textSize = 12f
-        ancMapHint.setTextColor(pal.onVariant)
-        ancMapHint.setPadding(dp(4), 0, dp(4), dp(6))
-        box.addView(ancMapHint, LinearLayout.LayoutParams(-1, -2))
-        ancMapState.text = customLabel(getSP().getInt("anc_map_custom", 0) == 1)
-        box.addView(ancMapState, LinearLayout.LayoutParams(-1, -2))
-        // 「当前型号档案」与「当前：…」同规格（12sp medium / primary），视觉上成对
-        box.addView(mapStateLine(Lang.t("当前型号档案：", "Active profile: ") + ancMapProfile +
-                Lang.t("（未改动的档位一律按档案发送）", " (untouched levels follow the profile)")),
-                LinearLayout.LayoutParams(-1, -2))
-        val ancMapNames = AncProfileLib.modeNames(requireContext())
-        val ancMapDefaults = GaiaBleClient.getInstance().getEffectiveAncMap()
-        // 编辑任意一格时，把全部 4 格按「当前生效映射」一起落库。
-        // 旧实现只写被编辑的那一格——未写过的格子会在读取时回退到名义默认映射
-        // （GaiaBleClient.readAncMap 的老逻辑），于是在 GA2 上只要碰一个档位，
-        // 透传/抗风就被悄悄换位（实测 anc_map_2=3 / anc_map_3=4 两格残留）。
-        // alpha2.53: 改成下拉选择（对齐官方）。原先每档一个裸输入框有三个问题：
-        //  · 可选范围只写在提示里，输入框本身看不出能填几
-        //  · 边打字边落库，把半截输入（想把 3 改成 12 的中间态 1）写进配置
-        //  · 越界输入被静默丢弃，界面显示与存储不一致
-        // 下拉把可选值收敛成固定集合，越界与中间态都不可能出现。
-        val ancMapCur = ancMapDefaults.copyOf()
-        val ancMapRows = ArrayList<View>()
-        for (i in 0..3) {
-            // Unsupported profile slots are preserved, not offered as a custom hide action.
-            if (ancMapCur[i] < 0) {
-                ancMapRows.add(M3Ui.listRow(requireActivity(), pal, 0, ancMapNames[i],
-                        Lang.t("不支持", "Unsupported"), null, null))
-                continue
-            }
-            val opts = Array(6) { it.toString() }
-            lateinit var row: LinearLayout
-            row = M3Ui.dropdownRow(requireActivity(), pal, ancMapNames[i],
-                    Lang.t("发送的设备码（0-5）", "Device code sent (0-5)"),
-                    opts, ancMapCur[i].coerceIn(0, 5)) { pick ->
-                ancMapCur[i] = pick
-                // 一次落库全部 4 档：只写被编辑的那一格会让未写过的格子
-                // 回退到名义默认映射，于是碰一下就把透传/抗风惄惄换位
-                val ed = getSP().edit()
-                for (j in 0..3) ed.putInt("anc_map_" + j, ancMapCur[j])
-                ed.putInt("anc_map_custom", 1).commit()
-                M3Ui.setDropdownValue(row, opts[pick])
-                ancMapState.text = customLabel(true)
-            }
-            ancMapRows.add(row)
-        }
-        box.addView(M3Ui.groupCard(requireActivity(), pal, *ancMapRows.toTypedArray()))
-        box.addView(spacer(dp(10)))
-
-        // 控制哪一档会出现在界面上 —— 与上面的档位映射同属「档位的呈现与发送」，
-        // 原先挂在「功能」组末尾，前面紧跟「通知」小标题，会被读成通知的一部分
-        val swWind = makeTintedSwitch()
-        swWind.isChecked = getSP().getBoolean("show_wind", true)
-        val rowWind = M3Ui.listRow(requireActivity(), pal, R.drawable.ic_air,
-                Lang.t("显示抗风噪按钮", "Show the wind-noise button"),
-                Lang.t("控制抗风档的显隐",
-                        "Whether the wind-noise level is shown"),
-                swWind, null)
-        swWind.setOnCheckedChangeListener { _, checked ->
-            getSP().edit().putBoolean("show_wind", checked).commit()
-        }
-        box.addView(M3Ui.groupCard(requireActivity(), pal, rowWind))
-        box.addView(spacer(dp(10)))
-
-        // ── 增益映射（alpha2.37：用户自定义增益设备码，同 ANC 映射逻辑）──
-        box.addView(makeSubLabel(Lang.t("增益按钮", "Gain buttons")))
-        val gainMapHint = TextView(requireContext())
-        gainMapHint.text = Lang.t("各档位对应的设备码（0-9）",
-                "Device code (0-9) for each level")
-        gainMapHint.textSize = 12f
-        gainMapHint.setTextColor(pal.onVariant)
-        gainMapHint.setPadding(dp(4), 0, dp(4), dp(6))
-        box.addView(gainMapHint, LinearLayout.LayoutParams(-1, -2))
-        val gainLabels = DeviceControlBridge.gainLabels()
-        val gainCount = DeviceControlBridge.gainCount()
-        val gainDefaults = AncProfileLib.resolveDc(GaiaBleClient.getInstance().getConnectedDeviceName()).gainMap
-        // alpha2.53: 同 ANC 映射，改下拉。第 0 项是「隐藏该档位」（对应设备码 -1）。
-        val gainMapRows = ArrayList<View>()
-        for (i in 0 until gainCount) {
-            val opts = Array(11) { if (it == 0) Lang.t("隐藏该档位", "Hide this level") else (it - 1).toString() }
-            val saved = getSP().getInt("gain_map_" + i, gainDefaults.getOrElse(i) { i })
-            val cur = if (saved < 0) 0 else (saved + 1).coerceIn(0, 10)
-            lateinit var row: LinearLayout
-            row = M3Ui.dropdownRow(requireActivity(), pal,
-                    gainLabels.getOrElse(i) { Lang.t("档位 ", "Level ") + i },
-                    Lang.t("发送的设备码（0-9），或隐藏", "Device code (0-9), or hide"),
-                    opts, cur) { pick ->
-                getSP().edit().putInt("gain_map_" + i, if (pick == 0) -1 else pick - 1).commit()
-                DeviceControlBridge.refreshProfile(requireContext())
-                M3Ui.setDropdownValue(row, opts[pick])
-            }
-            gainMapRows.add(row)
-        }
-        box.addView(M3Ui.groupCard(requireActivity(), pal, *gainMapRows.toTypedArray()))
-        box.addView(spacer(dp(10)))
-
-        // ── 空间音频追踪模式（alpha2.37：用户自定义标签）──
-        box.addView(makeSubLabel(Lang.t("空间音频追踪标签", "Spatial audio tracking labels")))
-        val trackHint = TextView(requireContext())
-        trackHint.text = Lang.t("空间音频各追踪模式的显示名称", "Display names for the spatial-audio tracking modes")
-        trackHint.textSize = 12f
-        trackHint.setTextColor(pal.onVariant)
-        trackHint.setPadding(dp(4), 0, dp(4), dp(6))
-        box.addView(trackHint, LinearLayout.LayoutParams(-1, -2))
-        val trackLabels = AncProfileLib.resolveDc(ancProfileDevice).trackingLabels
-        val trackRows = ArrayList<View>()
-        for (i in trackLabels.indices) {
-            val et = EditText(requireContext())
-            et.setText(getSP().getString("track_label_" + i, trackLabels[i]))
-            et.textSize = 16f
-            et.setSingleLine(true)
-            et.setPadding(dp(8), dp(4), dp(8), dp(4))
-            val etBg = GradientDrawable()
-            etBg.shape = GradientDrawable.RECTANGLE
-            etBg.setStroke(dp(1), pal.outline)
-            etBg.setColor(pal.surface)
-            etBg.setCornerRadius(dp(8).toFloat())
-            et.background = etBg
-            // alpha2.53: 改成失焦/回车时才保存。原先每次按键都写库，
-            // 一个名字没敲完就落了半截；空值视为恢复默认。
-            val labelIdx = i
-            val defLabel = trackLabels[i]
-            et.hint = defLabel
-            et.imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
-            et.setOnFocusChangeListener { _, has ->
-                if (!has) {
-                    val v = et.text?.toString()?.trim()
-                    if (v.isNullOrEmpty()) {
-                        getSP().edit().remove("track_label_" + labelIdx).commit()
-                        et.setText(defLabel)
-                    } else {
-                        getSP().edit().putString("track_label_" + labelIdx, v).commit()
-                    }
-                    DeviceControlBridge.refreshProfile(requireContext())
-                }
-            }
-            et.setOnEditorActionListener { _, actionId, _ ->
-                if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE) {
-                    et.clearFocus()
-                    true
-                } else false
-            }
-            trackRows.add(M3Ui.listRow(requireActivity(), pal, 0,
-                    Lang.t("模式 ", "Mode ") + i, Lang.t("默认名称：", "Default name: ") + trackLabels[i], et, null))
-        }
-        box.addView(M3Ui.groupCard(requireActivity(), pal, *trackRows.toTypedArray()))
-        box.addView(spacer(dp(10)))
-
-        // ── 重置自定义映射（alpha2.37）──
-        val rowReset = M3Ui.listRow(requireActivity(), pal, R.drawable.ic_restart_alt,
-                Lang.t("重置所有自定义映射", "Reset all custom mappings"),
-                Lang.t("恢复型号档案默认值",
-                        "Restore the profile defaults"),
-                M3Ui.chevron(requireActivity(), pal.onVariant)) {
-            view?.clearFocus()
-            val editor = getSP().edit()
-            // 清除 ANC 映射
-            for (i in 0..3) editor.remove("anc_map_" + i)
-            editor.remove("anc_map_custom")
-            // 清除增益映射
-            for (i in 0 until gainCount) editor.remove("gain_map_" + i)
-            // 清除追踪标签
-            for (i in trackLabels.indices) editor.remove("track_label_" + i)
-            editor.commit()
-            DeviceControlBridge.refreshProfile(requireContext())
-            android.widget.Toast.makeText(requireContext(), Lang.t("已重置所有自定义映射", "All custom mappings reset"), android.widget.Toast.LENGTH_SHORT).show()
-            // 刷新当前页面
-            scheduleRebuild(0L)
-        }
-        box.addView(M3Ui.groupCard(requireActivity(), pal, rowReset))
-        box.addView(spacer(dp(14)))
-
-        // ── 后台：监听 / 隐藏 / 保活 —— 三项都在管「应用怎么活着」，与耳机功能无关 ──
-        box.addView(M3Ui.sectionTitle(requireActivity(), pal, Lang.t("后台", "Background")))
-        box.addView(M3Ui.groupCard(requireActivity(), pal, rowAuto, rowBg))
-        box.addView(spacer(dp(14)))
-
-        // ── 诊断与测试：权限检查 / 日志抓取 / 弹窗图标 / 模拟测试，
-        //    全是「排查与验证」用途，原来分散在「通用」与独立段，现在收拢一处 ──
-        box.addView(M3Ui.sectionTitle(requireActivity(), pal, Lang.t("诊断", "Diagnostics")))
-        // 调试模式：控制两个「排查用」入口（服务探测 / EQ 通道）是否出现，本身就是诊断项，
-        // 所以放在「诊断」分组卡的第一行。默认关 —— 普通用户不需要看到能发私有协议命令的入口。
-        val debugOn = getSP().getBoolean("debug_mode", false)
-        val swDebug = makeThemeSwitch("debug_mode", false, Lang.t("调试模式", "Debug mode"))
-        // 用带多彩图标容器的行（与「检查权限」「日志抓取」同款），保持诊断区视觉一致
-        val rowDebug = M3Ui.listRow(requireActivity(), pal, R.drawable.ic_bug_report,
-                Lang.t("调试模式", "Debug mode"),
-                Lang.t("显示排查入口（服务探测 / EQ 通道）",
-                        "Show diagnostics entries (GATT probe, SPP EQ)"),
-                swDebug, null)
-        // GATT 服务探测：判断型号是否提供 9ECA（均衡器）/GAIA 等私有服务
-        val rowProbe = M3Ui.listRow(requireActivity(), pal, R.drawable.ic_code,
-                Lang.t("服务探测（GATT）", "Service probe (GATT)"),
-                Lang.t("列出耳机的 GATT 服务",
-                        "List the earbud's GATT services"),
-                M3Ui.chevron(requireContext(), pal.onVariant)) {
-            startActivity(Intent(requireContext(), ServiceProbeActivity::class.java))
-        }
-        // EQ 通道（经典蓝牙 SPP）：读/切预设、读/写曲线
-        val rowEq = M3Ui.listRow(requireActivity(), pal, R.drawable.ic_anc_on,
-                Lang.t("EQ 通道（SPP）", "EQ over SPP"),
-                Lang.t("预设切换与曲线读写",
-                        "Preset switching and curve editing"),
-                M3Ui.chevron(requireContext(), pal.onVariant)) {
-            startActivity(Intent(requireContext(), EqSppActivity::class.java))
-        }
-        val diagRows = mutableListOf<View>(rowDebug, rowPerm, rowLog)
-        if (debugOn) {
-            // 调试日志：只在调试模式下出现，里面能直接看 AppLog 与相关 logcat
-            val rowDebugLog = M3Ui.listRow(requireActivity(), pal, R.drawable.ic_bug_report,
-                    Lang.t("调试日志", "Debug log"),
-                    Lang.t("应用内日志与系统 logcat",
-                            "In-app log and system logcat"),
-                    M3Ui.chevron(requireContext(), pal.onVariant)) {
-                startActivity(Intent(requireContext(), DebugLogActivity::class.java))
-            }
-            diagRows.add(rowDebugLog)
-            diagRows.add(rowProbe)
-            diagRows.add(rowEq)
-        }   // 只有调试模式才暴露
-        box.addView(M3Ui.groupCard(requireActivity(), pal, *diagRows.toTypedArray()))
-        box.addView(spacer(dp(10)))
-        box.addView(makeSubLabel(Lang.t("模拟测试", "Simulation Test")))
-        val simBox = LinearLayout(requireContext())
-        simBox.orientation = LinearLayout.VERTICAL
-        simBox.setPadding(dp(14), dp(12), dp(14), dp(12))
-        // 手动连接：从已配对设备里挑一个，主动尝试建立 GAIA 连接
-        // （自动发现失败时的兜底：例如设备名不在档案里、或广播丢了）
-        val rowManualConnect = M3Ui.listRow(requireActivity(), pal, R.drawable.ic_bluetooth,
-                Lang.t("手动连接设备", "Connect a device manually"),
-                Lang.t("从已配对设备中选择并尝试连接",
-                        "Pick a bonded device and try to connect"),
-                M3Ui.chevron(requireContext(), pal.onVariant)) {
-            startActivity(Intent(requireContext(), ManualConnectActivity::class.java))
-        }
-        box.addView(M3Ui.groupCard(requireActivity(), pal, rowManualConnect),
-                LinearLayout.LayoutParams(-1, -2))
-        box.addView(spacer(dp(12)))
-
-        simConnBtn = makeM3Button(Lang.t("模拟连接耳机", "Simulate connecting the earbuds"), R.drawable.ic_bluetooth, pal.container, pal.onContainer) {
-            // 模拟连接：GAIA 模拟态 + 左右耳模拟电量 + 默认降噪模式 + 弹窗（可重复点击）
-            GaiaBleClient.setSimConnected(true)
-            BatteryStore.setGaiaLevel(SIM_MAC, 1, 86)
-            BatteryStore.setGaiaLevel(SIM_MAC, 2, 72)
-            AncBridge.notifyAncMode(1)
-            PopupGate.clear(SIM_MAC, SIM_NAME)
-            PopupGate.tryShowConnected(requireContext(), SIM_MAC, SIM_NAME)
-            // alpha2.7: 模拟弹窗消失后自动恢复（自带弹窗用 hide 钩子，GMS 弹窗用 30s 兜底）
-            simRestoreHandler.removeCallbacks(simRestoreRunnable)
-            simRestoreHandler.postDelayed(simRestoreRunnable, 30000)
-        }
-        simBox.addView(simConnBtn, LinearLayout.LayoutParams(-1, -2))
-        // 模拟连接的一半效果在 GMS 弹窗上：模块未激活时那张卡片不会出现，
-        // 点下去只剩主界面静默切进模拟态 —— 与按钮名字给人的预期不符。
-        // 与「官方集成」那四项同待遇：确定不可用时置灰并写明原因。
-        if (hookOff) {
-            // simConnBtn 字段声明为可空（供旧版本兼容路径判空），这里用安全调用
-            simConnBtn?.isEnabled = false
-            simConnBtn?.alpha = 0.4f
-            simBox.addView(spacer(dp(8)))
-            val simHint = TextView(requireContext())
-            simHint.text = Lang.t("需要 FastPairHook 模块才能在 GMS 中显示卡片",
-                    "Requires the FastPairHook module to show the card in GMS")
-            simHint.textSize = 12f
-            simHint.setTextColor(pal.onVariant)
-            simBox.addView(simHint, LinearLayout.LayoutParams(-1, -2))
-        }
-        simBox.addView(spacer(dp(10)))
-        // alpha2.38: 模拟断开按钮已移除（不再有断开弹窗，30s 自动恢复即可）
-        box.addView(M3Ui.wrapInCard(requireContext(), pal, simBox), LinearLayout.LayoutParams(-1, -2))
-        box.addView(spacer(dp(14)))
-
-        // ── 更新：联网检查更新（3.2.11）──
-        //    默认关闭，且开关关闭时不发起任何请求（见 UpdateChecker.check 的首行返回）。
-        box.addView(M3Ui.sectionTitle(requireActivity(), pal, Lang.t("更新", "Updates")))
-        val swNetUpdate = makeTintedSwitch()
-        swNetUpdate.isChecked = UpdateChecker.isEnabled(requireContext())
-        val rowNetUpdate = M3Ui.listRow(requireActivity(), pal, R.drawable.ic_settings_ethernet,
-                Lang.t("联网检查更新", "Check for updates online"),
-                Lang.t("查询 GitHub 上的新版本",
-                        "Check GitHub for new versions"),
-                swNetUpdate, null)
-
-        // 「更新通道」只在联网开启时存在。
-        // 不复用 scheduleRebuild：为了显一行而整页重建，页面会闪一下、焦点也丢，
-        // 代价明显大于收益 —— 改成本地淡入淡出（M3Ui.reveal，与「种子颜色」行同一组 token）。
-        val chIdx = if (UpdateChecker.channel(requireContext()) == UpdateChecker.Channel.PRERELEASE) 1 else 0
-        val rowChannel = M3Ui.dropdownRow(requireActivity(), pal,
-                Lang.t("更新通道", "Update channel"),
-                Lang.t("预发布可能包含未验证改动",
-                        "Pre-releases may contain unverified changes"),
-                arrayOf(Lang.t("正式版", "Stable"), Lang.t("预发布", "Pre-release")),
-                chIdx) { mi ->
-            UpdateChecker.setChannel(requireContext(),
-                    if (mi == 1) UpdateChecker.Channel.PRERELEASE else UpdateChecker.Channel.STABLE)
-        }
-        // 「联网检查更新」与「更新通道」是同一组（一张卡两行，中间 1dp 细缝），
-        // 之前各建一张卡、中间还垫了 12dp spacer，看着像两个互不相干的设置。
-        // 自动检查与频率：只在联网开启时出现（默认每天一次，仅打开应用时检查）
-        val updSp = requireContext().getSharedPreferences("cfg", 0)
-        val swAutoUpdate = makeTintedSwitch()
-        swAutoUpdate.isChecked = updSp.getBoolean("update_auto", true)
-        val rowAutoUpdate = M3Ui.listRow(requireActivity(), pal, R.drawable.ic_refresh,
-                Lang.t("自动检查更新", "Auto check"),
-                Lang.t("仅打开应用时检查，不常驻后台", "Only when the app opens"),
-                swAutoUpdate, null)
-
-        val days = updSp.getInt("update_interval_days", 1)
-        val freqIdx = when (days) { 3 -> 1; 7 -> 2; else -> 0 }
-        val rowFreq = M3Ui.dropdownRow(requireActivity(), pal,
-                Lang.t("检查频率", "Check frequency"),
-                null,
-                arrayOf(Lang.t("每天", "Daily"), Lang.t("每 3 天", "Every 3 days"),
-                        Lang.t("每周", "Weekly")),
-                freqIdx) { mi ->
-            val d = when (mi) { 1 -> 3; 2 -> 7; else -> 1 }
-            updSp.edit().putInt("update_interval_days", d).apply()
-        }
-
-        val updCard = M3Ui.groupCard(requireActivity(), pal,
-                rowNetUpdate, rowChannel, rowAutoUpdate, rowFreq)
-        val updInner = updCard.getChildAt(0) as? LinearLayout
-        // groupCard 内部结构：[行0, 细缝, 行1]；通道行隐藏时那条 1dp 细缝也得一起藏
-        val updGap = updInner?.getChildAt(1)
-        val showChannel = UpdateChecker.isEnabled(requireContext())
-        rowChannel.visibility = if (showChannel) View.VISIBLE else View.GONE
-        updGap?.visibility = rowChannel.visibility
-        box.addView(updCard, LinearLayout.LayoutParams(-1, -2))
-
-        swNetUpdate.setOnCheckedChangeListener { _, checked ->
-            UpdateChecker.setEnabled(requireContext(), checked)
-            M3Ui.reveal(rowChannel, checked)
-            updGap?.visibility = if (checked) View.VISIBLE else View.GONE
-        }
-        box.addView(spacer(dp(14)))
-
-        // ── 帮助：使用引导入口（3.1.0）—— 放在全页最底部，
-        //    想重看功能概览、权限申请与各项开关时不必卸载重装 ──
-        box.addView(M3Ui.sectionTitle(requireActivity(), pal, Lang.t("帮助", "Help")))
-        val rowOnboard = makeNavRow(R.drawable.ic_info,
-                Lang.t("使用引导", "Getting started"),
-                Lang.t("重新查看功能概览与权限申请",
-                        "Replay the feature tour and permission requests")) {
-            startActivity(Intent(requireContext(), OnboardingActivity::class.java))
-        }
-        box.addView(M3Ui.groupCard(requireActivity(), pal, rowOnboard))
-
-        sv.addView(box, FrameLayout.LayoutParams(-1, -2))
-        root.addView(page.container, LinearLayout.LayoutParams(-1, 0, 1f))
-
-        // Hook 状态首次可能是「尚未探测」（null）：上面按「可用」渲染（不置灰），
-        // 这里后台补探一次（PING 阻塞 ~2s，必须离开主线程）。已探测过则不重复探。
-        //   未激活 -> 重刷本页（要置灰那几项），走 scheduleRebuild 现成的生命周期防护；
-        //   已激活 -> 不必重画整页，只把运行模式行的文案换成实测结果（免得丢滚动位置）。
-        if (EnvProbe.hookActiveCached() == null) {
-            val appCtx = requireContext().applicationContext
-            Thread {
-                if (!EnvProbe.isFastPairHookActive(appCtx)) {
-                    scheduleRebuild(0)
-                } else {
-                    activity?.runOnUiThread {
-                        if (isAdded) {
-                            runModeNameTv?.text = EnvProbe.runModeName(appCtx)
-                            runModeDetailTv?.text = EnvProbe.runModeDetail(appCtx)
-                        }
-                    }
-                }
-            }.start()
-        }
-        return root
+        )
+        return scroll
     }
 
-    /**
-     * 3.2.10: 点「运行模式」行 -> 重新检测模块状态。
-     *
-     * 与权限页「重新检查」同一语义：先清掉 root / hook 的负结果再实测。
-     * 只读缓存的刷新（onResume）不够 —— 负结果在有效期内会被 checkAll 直接复用，
-     * 用户点了看不到任何变化。探测最长阻塞 10s，必须在子线程。
-     */
-    private fun recheckRunMode() {
-        val act = activity ?: return
-        val appCtx = act.applicationContext
-        // 即时反馈，避免点下去像没反应
-        runModeNameTv?.text = Lang.t(appCtx, "检测中…", "Detecting…")
-        runModeDetailTv?.text = Lang.t(appCtx, "正在检测 FastPairHook 模块状态…",
-                "Detecting FastPairHook module…")
-        val before = EnvProbe.hookActiveCached()
-        Thread {
-            RootShell.retryNow()
-            EnvProbe.retryHookProbe()
-            RootShell.isAvailable()
-            EnvProbe.isFastPairHookActive(appCtx)
-            act.runOnUiThread {
-                if (!isAdded) return@runOnUiThread
-                runModeNameTv?.text = EnvProbe.runModeName(appCtx)
-                runModeDetailTv?.text = EnvProbe.runModeDetail(appCtx)
-                // 模块是否激活决定「官方集成」那几项要不要置灰，状态变了得整页重画。
-                // 滚动位置由 m3_page_scroll 的固定 id 保留，不会跳回顶部。
-                if (before != EnvProbe.hookActiveCached()) scheduleRebuild(0L)
-            }
-        }.start()
+    private fun section(parent: LinearLayout, title: String) {
+        parent.addView(TextView(requireContext()).apply {
+            text = title
+            textSize = 14f
+            setTextColor(pal.onVariant)
+            typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
+            setPadding(dp(2), dp(22), dp(2), dp(10))
+        })
     }
 
-    /**
-     * 取 [M3Ui.listRow] 里「标题 / 副标题」两个 TextView。
-     * 运行模式行要用：模块状态是子线程探测出来的，落定后就地改文本，
-     * 比整页重建更轻（重建虽已能保留滚动位置，但仍比就地改文本重）。结构不符时返回 null。
-     */
-    private fun listRowLabels(row: View): Pair<TextView, TextView>? {
-        val labels = runCatching {
-            val outer = row as LinearLayout
-            outer.getChildAt(outer.childCount - 1) as LinearLayout
-        }.getOrNull() ?: return null
-        if (labels.childCount < 2) return null
-        val title = runCatching { labels.getChildAt(0) as TextView }.getOrNull() ?: return null
-        val sub = runCatching { labels.getChildAt(1) as TextView }.getOrNull() ?: return null
-        return title to sub
+    private fun card() = MaterialCardView(requireContext()).apply {
+        radius = dp(26).toFloat()
+        setCardBackgroundColor(pal.card)
+        strokeWidth = 0
+        cardElevation = 0f
     }
 
-    // ── UI 辅助 ──
-    /** alpha2.53: 自定义映射的状态行（当前值 / 当前型号档案），统一规格：12sp medium + primary */
-    private fun mapStateLine(text: String): TextView {
-        val t = TextView(requireContext())
-        t.text = text
-        t.textSize = 12f
-        t.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-        t.setTextColor(pal.primary)
-        t.setPadding(dp(4), 0, dp(4), dp(6))
-        return t
-    }
-
-    /** alpha2.53: 自定义映射当前状态描述（对齐官方的「当前值就在行上」） */
-    private fun customLabel(custom: Boolean): String =
-            if (custom) Lang.t("当前：自定义映射生效", "Current: custom mapping active")
-            else Lang.t("当前：跟随型号档案", "Current: following device profile")
-
-    /** alpha2.52: 自定义映射分组内的小标题（比 sectionTitle 轻一级，用于同组内分块） */
-    private fun makeSubLabel(text: String): TextView {
-        val t = TextView(requireContext())
-        t.text = text
-        t.textSize = 14f
-        t.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-        t.setTextColor(pal.onSurface)
-        // 3.3.1: 左边距 24dp，与 sectionTitle 及列表行内容**同一条基准线**
-        // （rikkax material-preference 的 listPreferredItemPaddingStart = 24dp）
-        t.setPadding(dp(16), dp(8), dp(16), dp(2))
-        return t
-    }
-
-    private fun getSP(): android.content.SharedPreferences =
-            requireContext().getSharedPreferences("cfg", Context.MODE_PRIVATE)
-
-    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
-
-    private fun spacer(h: Int): View = View(requireContext()).apply {
-        layoutParams = LinearLayout.LayoutParams(1, h)
-    }
-
-    /** 已配对设备列表 -> 选中后尝试连接（GAIA 直连） */
-    private fun showManualConnectDialog() {
-        val ctx = requireContext()
-        val adapter = try { android.bluetooth.BluetoothAdapter.getDefaultAdapter() } catch (_: Throwable) { null }
-        val bonded = try { adapter?.bondedDevices?.toList().orEmpty() } catch (_: Throwable) { emptyList() }
-        if (bonded.isEmpty()) {
-            toast(Lang.t("没有已配对的蓝牙设备", "No bonded Bluetooth devices"))
-            return
+    private fun toggleCard(
+        title: String,
+        summary: String,
+        checked: Boolean,
+        changed: (Boolean) -> Unit
+    ): MaterialCardView {
+        val card = card()
+        val row = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(18), dp(17), dp(14), dp(17))
         }
-        val names = bonded.map { d ->
-            val n = try { d.name } catch (_: Throwable) { null } ?: "?"
-            n + "\n" + d.address
-        }.toTypedArray()
-        MaterialAlertDialogBuilder(ctx)
-                .setTitle(Lang.t("选择要连接的设备", "Choose a device"))
-                .setItems(names) { _, which ->
-                    val d = bonded[which]
-                    val addr = try { d.address } catch (_: Throwable) { null } ?: return@setItems
-                    toast(Lang.t("正在尝试连接：", "Connecting: ") + addr)
-                    try {
-                        ctx.startService(Intent(ctx, HeadsetDetectService::class.java)
-                                .setAction(HeadsetDetectService.ACTION_MANUAL_CONTROL))
-                    } catch (_: Throwable) { }
-                    val ok = try { GaiaBleClient.getInstance().connect(ctx, addr) } catch (_: Throwable) { false }
-                    toast(if (ok) Lang.t("已发起连接", "Connection started")
-                    else Lang.t("连接发起失败（检查蓝牙权限/开关）", "Failed to start (check Bluetooth permission)"))
-                }
-                .setNegativeButton(Lang.t("取消", "Cancel"), null)
-                .show()
-    }
-
-    private fun makeM3Button(text: String, iconRes: Int, bgColor: Int, textColor: Int,
-                             l: View.OnClickListener): MaterialButton {
-        // 与概览页「刷新状态」同一尺寸档（Medium：视觉 56dp / 图标 24dp / 16sp），
-        // 页面上同等重要的主操作按钮尺寸必须一致，Small 40dp 在这页会显得又扁又小。
-        return M3Ui.actionButton(requireContext(), text, iconRes, bgColor, textColor, l, medium = true)
-    }
-
-    private fun makeTintedSwitch(): MaterialSwitch {
-        val sw = MaterialSwitch(requireContext())
-        M3Ui.standardSwitch(sw, pal)
-        return sw
-    }
-
-    /** 真实耳机已连接时禁用模拟按钮（与主页"连接后不可用"逻辑一致） */
-    private fun updateSimState() {
-        val real = HeadsetGate.getConnectedMac(requireContext()) != null
-        simConnBtn?.let { setSimEnabled(it, !real) }
-    }
-
-    private fun setSimEnabled(b: MaterialButton, en: Boolean) {
-        b.isEnabled = en
-        b.alpha = if (en) 1f else 0.45f
-        b.backgroundTintList = ColorStateList.valueOf(if (en) pal.container
-        else if (pal.dark) 0x14FFFFFF else 0x0A000000)
-        b.setTextColor(if (en) pal.onContainer else pal.onVariant)
-    }
-
-    override fun onDestroyView() {
-        super.onDestroyView()
-        // alpha2.54: 视图销毁即取消挂起的重建，并断开对旧视图的引用
-        rebuildHandler.removeCallbacks(rebuildRunnable)
-        seedRow = null
-    }
-
-    override fun onResume() {
-        super.onResume()
-        updateSimState()
-    }
-
-    override fun onPause() {
-        // Commit the focused tracking label before leaving the settings view.
-        view?.clearFocus()
-        super.onPause()
-    }
-
-    /** M3 文本按钮：统一走 M3Ui.textButton（去掉旧版 0x14000000 药丸底，对齐 LSPosed 纯文本按钮） */
-    private fun makeMaterialTextButton(text: String, color: Int, l: View.OnClickListener): TextView {
-        val b = M3Ui.textButton(requireContext(), pal, text, l)
-        b.setTextColor(color)
-        return b
-    }
-
-    /** 通用导航行（alpha1.36: M3Ui 卡片行——圆形容器图标 + chevron） */
-    private fun makeNavRow(iconRes: Int, title: String, sub: String, onNav: Runnable): LinearLayout =
-            M3Ui.navRow(requireActivity(), pal, iconRes, title, sub, onNav)
-
-    /** 通用开关行（alpha1.36: M3Ui 卡片行） */
-    private fun makeSwitchRow(title: String, sub: String, sw: MaterialSwitch): LinearLayout =
-            M3Ui.switchRow(requireActivity(), pal, title, sub, sw)
-
-    /** 3.3.1: 统一委托 groupCard —— 单行也走同一套卡片样式与内边距。
-     *  原来这里自己 padding(16,12,16,12)，与 groupCard 的行内 16dp 不一致，
-     *  会让"种子颜色"那张卡的文字比相邻卡片偏左/偏上。 */
-    private fun wrapCard(v: View): View =
-            M3Ui.groupCard(requireActivity(), pal, v)
-
-    /** 官方主题设置开关（MaterialSwitch），改动即存 SP + 重建 */
-    private fun makeThemeSwitch(key: String, def: Boolean, label: String): MaterialSwitch {
-        val sw = MaterialSwitch(requireContext())
-        sw.isChecked = getSP().getBoolean(key, def)
-        sw.contentDescription = label
-        M3Ui.standardSwitch(sw, pal)
-        sw.setOnCheckedChangeListener { _, checked ->
-            getSP().edit().putBoolean(key, checked).commit()
-            // alpha2.54: 取局部引用，避免 !! 断言与 parent 检查之间的 TOCTOU
-            val sr = seedRow
-            if (key == "dynamic_color" && checked && sr != null && sr.parent != null) {
-                // 开启动态取色 -> 先播种子颜色行消失动画，再重建（Material fade+slide）
-                sr.animate().alpha(0f).translationY(dp(8).toFloat())
-                        .setDuration(Motion.SHORT4)
-                        .setInterpolator(Motion.exit()).start()
-                scheduleRebuild(550L)
-            } else {
-                // 等 MaterialSwitch 动画播完再重建（立即 recreate 会吞掉开关动画）
-                scheduleRebuild(350L)
-            }
+        val copy = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
         }
-        return sw
+        copy.addView(TextView(requireContext()).apply {
+            text = title
+            textSize = 16f
+            setTextColor(pal.onSurface)
+            typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
+        })
+        copy.addView(TextView(requireContext()).apply {
+            text = summary
+            textSize = 12f
+            setTextColor(pal.onVariant)
+            setPadding(0, dp(5), 0, 0)
+        })
+        row.addView(copy, LinearLayout.LayoutParams(0, -2, 1f))
+        row.addView(MaterialSwitch(requireContext()).apply {
+            isChecked = checked
+            setOnCheckedChangeListener { _, value -> changed(value) }
+        })
+        card.addView(row)
+        return card
     }
 
-    private fun toast(msg: String) {
-        Toast.makeText(requireContext(), msg, Toast.LENGTH_LONG).show()
-    }
-
-
-    /**
-     * 3.3.0: 改用 M3 官方 MaterialAlertDialogBuilder。
-     * 标题/正文/按钮排版与无障碍语义全部交给官方组件（此前是自绘 Dialog + 手搓按钮行），
-     * 颜色取自主题 M3 token（见 res/values 与 res/values-night 下的 colors.xml），与 ThemeUtil.Palette 同源。
-     * ok 回调在主线程。
-     */
-    private fun showMaterialConfirm(t: String, m: String, okText: String, onOk: Runnable) {
-        MaterialAlertDialogBuilder(requireContext())
-                .setTitle(t)
-                .setMessage(m)
-                .setNegativeButton(Lang.t("取消", "Cancel"), null)
-                .setPositiveButton(okText) { _, _ -> onOk.run() }
-                .show()
-    }
-
-    /** 3.3.0: M3 官方 MaterialAlertDialogBuilder（同 showMaterialConfirm）。 */
-    private fun showSimpleDialog(t: String, m: String) {
-        MaterialAlertDialogBuilder(requireContext())
-                .setTitle(t)
-                .setMessage(m)
-                .setPositiveButton(Lang.t("知道了", "Got it"), null)
-                .show()
-    }
-
-    // ── 弹窗图标（与 alpha1.34 行为一致）──
-    /** 3.0.5: 自定义图标存在性改为查本应用 filesDir（无需 Root，可主线程直调）。 */
-    private fun iconCustomExists(): Boolean = IconStore.exists(requireContext().applicationContext)
-
-    private fun iconCustomExistsAsync(callback: (Boolean) -> Unit) {
-        // 本地文件判断，毫秒级，无需线程切换
-        callback(iconCustomExists())
-    }
-
-    /**
-     * 3.0.5: 相册选图改用 ActivityResultLauncher。
-     *
-     * 旧实现走 `requireActivity().startActivityForResult` + Fragment.onActivityResult，
-     * 实测（Android 15 / ColorOS）结果根本不回调到 Fragment —— 选中图片后什么都没发生，
-     * 也就是用户看到的「图标怎么改都没反应」。
-     */
-    private val iconPicker = registerForActivityResult(
-            androidx.activity.result.contract.ActivityResultContracts.GetContent()
-    ) { uri -> if (uri != null) saveIconFromUri(uri) }
-
-    /**
-     * 点「弹窗图标」整行 = 直接选图（不再弹二级弹窗）。
-     *
-     * 原来的二级弹窗只是为了塞「从相册选择 / 恢复默认图标」两个动作，等于让用户多走一步；
-     * 现在「从相册选择」= 点行本身，「恢复默认」= 行右侧的次要按钮，两者都在一级页面上。
-     */
-    private fun pickIcon() {
-        try {
-            iconPicker.launch("image/*")
-        } catch (t: Throwable) {
-            toast("无法打开选择器：${t.message}")
+    private fun navigationCard(
+        title: String,
+        summary: String,
+        action: () -> Unit
+    ): MaterialCardView {
+        val card = card().apply {
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { action() }
         }
-    }
-
-    private fun showLogDialog() {
-        showMaterialConfirm(Lang.t("日志抓取 · 隐私声明", "Log capture · Privacy notice"),
-                LogCollector.privacyNotice(requireContext()),
-                Lang.t("同意并抓取", "Agree and capture")) {
-            toast(Lang.t("⏳ 正在收集日志…", "⏳ Collecting logs…"))
-            val appContext = requireContext().applicationContext
-            val owner = viewLifecycleOwner
-            Thread {
-                try {
-                    val path = LogCollector.collect(appContext)
-                    postToView(owner) {
-                        showSimpleDialog(Lang.t("日志已保存", "Log saved"),
-                                Lang.t("已打包为 ZIP（含 6 条分类日志：系统/应用/蓝牙/环境/logcat/运行日志）。\n\n路径：\n", "Packaged as ZIP (6 log categories: system/app/bluetooth/env/logcat/run).\n\nPath:\n") + path +
-                                        Lang.t("\n\n您可自行将文件分享给开发者进行设备适配分析。", "\n\nYou can share it with the developer for device adaptation."))
-                    }
-                } catch (t: Exception) {
-                    postToView(owner) { toast(Lang.t("日志抓取失败: ", "Log capture failed: ") + t.message) }
-                }
-            }.start()
+        val row = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(18), dp(18), dp(18), dp(18))
         }
-    }
-
-    private fun resetCustomIcon() {
-        // 3.0.5: 只删本应用内的图标文件（无需 Root）
-        val ok = IconStore.clear(requireContext().applicationContext)
-        toast(if (ok) "已恢复默认图标（下次连接生效）" else "恢复失败")
-    }
-
-    private fun postToView(owner: LifecycleOwner, action: () -> Unit) {
-        rebuildHandler.post {
-            owner.lifecycle.runWhenResumed {
-                if (viewLifecycleOwnerLiveData.value === owner) action()
-            }
+        val copy = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
         }
-    }
-
-    private fun saveIconFromUri(uri: Uri) {
-        val appContext = context?.applicationContext ?: return
-        val owner = viewLifecycleOwnerLiveData.value ?: return
-        Thread {
-            try {
-                val png = IconStore.readPng(appContext, uri)
-                val ok = IconStore.save(appContext, png)
-                postToView(owner) {
-                    toast(if (ok) "弹窗图标已更新（下次连接生效）" else "写入图标失败")
-                    if (ok) scheduleRebuild(250L)
-                }
-            } catch (t: Throwable) {
-                postToView(owner) { toast("图标处理失败: ${t.message}") }
-            }
-        }.start()
-    }
-
-    companion object {
-        private const val SIM_MAC = "AA:BB:CC:DD:EE:FF"
-        private const val SIM_NAME = "Moondrop Golden Ages 2"
+        copy.addView(TextView(requireContext()).apply {
+            text = title
+            textSize = 16f
+            setTextColor(pal.onSurface)
+            typeface = android.graphics.Typeface.create("sans-serif-medium", 0)
+        })
+        copy.addView(TextView(requireContext()).apply {
+            text = summary
+            textSize = 12f
+            setTextColor(pal.onVariant)
+            setPadding(0, dp(5), 0, 0)
+        })
+        row.addView(copy, LinearLayout.LayoutParams(0, -2, 1f))
+        row.addView(TextView(requireContext()).apply {
+            text = "›"
+            textSize = 26f
+            setTextColor(pal.onVariant)
+        })
+        card.addView(row)
+        return card
     }
 }

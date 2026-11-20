@@ -27,12 +27,11 @@ class DeviceMatcher {
 
         /** 型号关键字（小写比较，contains 匹配）。新增已知型号在此追加。 */
         private val KNOWN_KEYS = listOf(
-            "moondrop",
-            "golden ages",
-            "goldenages",
-            "水月雨",
-            "robin",
-            "知更鸟"
+            "space travel 2",
+            "space travel2",
+            "space travel ii",
+            "太空漫游2",
+            "太空漫游 2"
         )
 
         private const val PREF_LEARNED = "learned_device_names"
@@ -59,8 +58,7 @@ class DeviceMatcher {
             if (name == null) return false
             val n = name.lowercase(Locale.ROOT)
             if (KNOWN_KEYS.any { n.contains(it) }) return true
-            if (AncProfileLib.isMoondrop(name)) return true
-            return learned.contains(n.trim())
+            return KNOWN_KEYS.any { n.contains(it) }
         }
 
         /**
@@ -71,11 +69,7 @@ class DeviceMatcher {
          * 配对表里的其他设备（车机、其他耳机、手环）。
          */
         @JvmStatic
-        fun allowProbe(name: String?): Boolean {
-            if (isMoondrop(name)) return true
-            val n = norm(name) ?: return false
-            return !rejected.contains(n)
-        }
+        fun allowProbe(name: String?): Boolean = isMoondrop(name)
 
         /** 服务发现确认该设备存在 GAIA / 9ECA 服务：记住它，此后全链路放行。 */
         @JvmStatic

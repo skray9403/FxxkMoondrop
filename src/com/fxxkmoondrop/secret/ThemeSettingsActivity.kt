@@ -11,7 +11,7 @@ import android.widget.TextView
 /**
  * 主题设置（二级页）。
  *
- * 对齐 LSPosed「主题设置」的信息层级：主题 / 强调色 / 调色规范 / 调色板风格 / 界面缩放
+ * Material 3 Expressive theme settings：主题 / 强调色 / 调色规范 / 调色板风格 / 界面缩放
  * 全部收在这一页，设置页只留一个入口 —— 避免外观分组被七八行下拉撑爆。
  */
 class ThemeSettingsActivity : BaseActivity() {
@@ -97,18 +97,9 @@ class ThemeSettingsActivity : BaseActivity() {
         body.addView(M3Ui.groupCard(this, pal, dynRow, amoledRow, stdRow, variantRow),
                 LinearLayout.LayoutParams(-1, -2))
 
-        // ── 界面：导航方式 + 界面缩放 ─────────────────────────
-        body.addView(M3Ui.sectionTitle(this, pal, Lang.t("界面", "Interface")))
-        val navRow = M3Ui.dropdownRow(this, pal,
-                Lang.t("导航方式", "Navigation"),
-                null,
-                arrayOf(Lang.t("悬浮导航栏", "Floating bar"),
-                        Lang.t("抽屉菜单", "Navigation drawer")),
-                if (sp().getInt("nav_mode", 1) == 1) 0 else 1) { mi ->
-            sp().edit().putInt("nav_mode", if (mi == 0) 1 else 0).commit()
-            // 只写偏好：主页在 onResume 检测到变化后自己重建，不把用户弹回去
-        }
-        val scale = UiStyle.clampScale(sp().getFloat("ui_scale", 1f))
+        // ── 界面缩放 ─────────────────────────────────────────
+        val storedScale = sp().getFloat("ui_scale", 1f)
+        val scale = if (storedScale.isFinite()) storedScale.coerceIn(0.8f, 1.2f) else 1f
         // 标题行：左侧说明这是哪一项，右侧显示当前百分比（此前只有一句「当前 100%」，没有项名）
         val titleRow = LinearLayout(this)
         titleRow.orientation = LinearLayout.HORIZONTAL
@@ -142,7 +133,7 @@ class ThemeSettingsActivity : BaseActivity() {
         wrap.addView(slider, LinearLayout.LayoutParams(-1, -2).also {
             it.leftMargin = dp(12); it.rightMargin = dp(12); it.bottomMargin = dp(8)
         })
-        body.addView(M3Ui.groupCard(this, pal, navRow, wrap), LinearLayout.LayoutParams(-1, -2))
+        body.addView(M3Ui.groupCard(this, pal, wrap), LinearLayout.LayoutParams(-1, -2))
 
 
     }

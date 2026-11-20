@@ -5,7 +5,6 @@ import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.content.Context
-import android.content.Intent
 import android.os.Looper
 import android.util.Log
 import java.util.concurrent.CountDownLatch
@@ -16,15 +15,13 @@ import java.util.concurrent.atomic.AtomicReference
  * 查找当前已连接的 Moondrop 耳机（名字含 moondrop）。
  * alpha1.36: 修复 ANR —— 原 getConnectedMac 在主线程执行 scanViaProxy（CountDownLatch.await
  * 最长 800ms×2），从设置页返回触发 onResume 时主线程阻塞导致 ANR（/data/anr 实锤）。
- * 现在：主线程只走非阻塞探测（服务代理 + GATT 同步 API），异步补扫完成发 MAC_UPDATED 广播；
+ * 现在：主线程只走非阻塞探测（服务代理 + GATT 同步 API），异步补扫结果写入缓存；
  * 结果缓存（内存 + SP），所有线程调用均安全。
  */
 class HeadsetGate {
     companion object {
         private const val TAG = "HeadsetGate"
 
-        /** 异步补扫找到 MAC 后广播（extra: mac） */
-        const val ACTION_MAC_UPDATED = "com.fxxkmoondrop.secret.MAC_UPDATED"
         private const val SP_LAST_MAC = "last_connected_mac"
         private const val SCAN_THROTTLE_MS = 3000L
 
@@ -121,7 +118,7 @@ class HeadsetGate {
             return null
         }
 
-        /** 异步补扫（节流 3s）：找到后缓存并广播 MAC_UPDATED */
+        /** 异步补扫（节流 3s）：找到后更新缓存 */
         private fun asyncRefresh(ctx: Context) {
             val now = System.currentTimeMillis()
             if (now - sLastAsyncScanAt < SCAN_THROTTLE_MS) return
@@ -132,12 +129,7 @@ class HeadsetGate {
                     val mac = fullScan(app)
                     if (mac != null) {
                         remember(app, mac)
-                        try {
-                            app.sendBroadcast(Intent(ACTION_MAC_UPDATED).setPackage(HookIpc.APP).putExtra("mac", mac))
-                            Log.d(TAG, "async scan found: $mac")
-                        } catch (e: Exception) {
-                            Log.w(TAG, "broadcast failed: $e")
-                        }
+                        Log.d(TAG, "async scan found: $mac")
                     } else {
                         // alpha2.18: 补扫未命中 -> 清陈旧缓存（断连后不再残留假 MAC）
                         val stale = lastKnown(app)

@@ -1,17 +1,10 @@
 plugins {
     id("com.android.application")
-    // 3.2.13: AGP 9.0 起 Kotlin 支持由 AGP 内置，
-    // 不能再声明 org.jetbrains.kotlin.android（会直接报错，见 kotl.in/gradle/agp-built-in-kotlin）
-    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 android {
     namespace = "com.fxxkmoondrop.secret"
-    // 3.2.13: 35 -> 37。Miuix（HyperOS 观感轨）全部版本的
-    // aar-metadata.properties 都写死 minCompileSdk=37，没有 35 可用的版本。
-    // 升的是**编译期**可见 API，targetSdk 仍是 36，运行时行为不变。
-    // 实测使用面极窄：全仓仅 2 处 VERSION_CODES.Q（API 35），
-    // 最高 SDK_INT 判断为 34，因此升级无行为变更风险。
+    // Android 17 SDK, required by the current Material 3 toolchain.
     compileSdk = 37
 
     defaultConfig {
@@ -21,12 +14,7 @@ android {
         versionCode = 401
         versionName = "3.4.1"
 
-        // DexKit 自带 4 个 ABI 的 libdexkit.so；x86/x86_64 只服务模拟器，
-        // 剔除后单 APK 省约 0.8MB（模块只跑在真机上）。
-        ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
-    }
 
     signingConfigs {
         create("release") {
@@ -39,17 +27,10 @@ android {
 
     buildTypes {
         release {
-            // 3.2.13: false -> true。引入 Compose + Miuix 后体积从 6.1M 涨到 18M，
+            // 3.2.13: false -> true。Standalone Material 3 build keeps the release artifact lean, 
             // 开 R8 压缩换回可接受的体积。
             //
-            // 风险已逐项核实（全仓 91 处反射）：
-            //   - 反射目标全是外部类（android.* / com.android.* / com.google.android.material.*
-            //     / com.moondroplab.* / com.qualcomm.*），不在我们 APK 内，不受影响；
-            //   - 真正的风险只有「LSPosed 按字符串加载入口」与「manifest 声明的组件
-            //     被系统按字符串实例化」两类，已在 proguard-rules.pro 里按需 keep。
-            //
-            // ⚠️ 规则刻意不写 `-keep class com.fxxkmoondrop.secret.** { *; }`，
-            // 那等于放弃 R8 对我们代码的全部优化，体积收益会大幅缩水。
+            // Keep rules below are limited to Android components created by the framework.
             isMinifyEnabled = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
@@ -75,21 +56,14 @@ android {
         }
     }
 
-    buildFeatures {
-        // 3.2.13: HyperOS 观感轨（UiStyle.MIUIX）需要 Compose。
-        // Material 轨不构建任何 Compose 源文件（源文件在 src/ 下按命名区分），
-        // 但 Compose 运行时仍会进 APK —— 体积影响见 docs/XIAOMI_INTEGRATION_PROGRESS.md。
-        compose = true
-    }
-
     compileOptions {
-        // 3.2.13: 17 -> 21，与 CI 的 JDK 21 及上方 jvmTarget 保持一致。
+        // Java 21 bytecode target, aligned with the CI JDK.
         // 三处（compileOptions / jvmTarget / CI java-version）必须同步改，
         // 否则会出现「Kotlin 字节码 21 + Java 目标 17」的混编警告或失败。
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21
     }
-    // Kotlin 2.3+ 起 kotlinOptions.jvmTarget 由警告升级为错误，须用 compilerOptions DSL。
+    // Kotlin compiler settings are declared below.
     // 位置必须在顶层 kotlin {}（不能放在 android {} 内），见 kotl.in/u1r8ln
 
     // 纯 JVM 单元测试（GaiaCommands 帧构造/映射）；无 Android 依赖，缺失的框架桩返回默认值
@@ -122,9 +96,6 @@ dependencies {
     implementation("androidx.annotation:annotation-experimental:1.0.0")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.appcompat:appcompat-resources:1.7.0")
-    // 蓝牙详情页「耳机控制」：自己当 SliceProvider，交给系统官方 SliceView 渲染
-    implementation("androidx.slice:slice-core:1.0.0")
-    implementation("androidx.slice:slice-builders:1.0.0")
     implementation("androidx.arch.core:core-runtime:2.2.0")
     implementation("androidx.cardview:cardview:1.0.0")
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
@@ -163,8 +134,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 
     // 单元测试（纯 JVM，验证 GaiaCommands 帧构造）
-    // 3.3.2: 「M3 标准」调色板只用它的 HCT（Cam16 + 色调映射），无 Compose 依赖、体积很小。
-    // 之前通过 miuix 传递进来，但 implementation 不暴露给本模块编译期，必须显式声明。
+    // M3 color utilities used by the dynamic palette implementation.
     implementation("com.materialkolor:material-color-utilities:5.0.1")
 
     testImplementation("junit:junit:4.13.2")
@@ -173,70 +143,8 @@ dependencies {
     // 仅测试期生效，不进 APK、不增加运行时体积。
     testImplementation("org.json:json:20260719")
 
-    // ── 3.2.13: HyperOS 观感轨（UiStyle.MIUIX）────────────────────────
-    // 许可：Miuix 为 Apache-2.0（不同于 HyperEars 的 AGPL-3.0，可放心引入）。
-    // 兼容性已核：miuix-ui-android 0.9.2 自身 minSdk=23，本模块 minSdk 32 满足。
-    // 参考项目 OppoPods / HyperEars 用 minSdk 35，本模块不跟随。
-    implementation(platform("androidx.compose:compose-bom:2026.05.01"))
-    implementation("androidx.compose.ui:ui")
-    implementation("androidx.compose.ui:ui-graphics")
-    implementation("androidx.compose.foundation:foundation")
-    implementation("androidx.compose.material3:material3")
-    // 1.5.0：官方 M3 Expressive LoadingIndicator（关于页图标背景动画）需要的版本
-    implementation("androidx.compose.material3:material3-android:1.5.0-rc01")
-    implementation("androidx.activity:activity-compose")
-    implementation("top.yukonga.miuix.kmp:miuix-ui-android:0.9.4")
-    // 3.2.13: miuix-preference 提供 **官方**的下拉选择组件
-    // `OverlayDropdownPreference`（title/summary/items/selectedIndex/onSelectedIndexChange）。
-    // 版���与 miuix-ui 严格一致（同 0.9.2），来自同一个 BOM。
-    //
-    // 用它的原因（用户要求「按 MIUI 官方的用法和规范」）：
-    // 自己拼 Popup 反复踩坑 —— 点外部不关闭、宽度不可控、动画不对，
-    // 而 ListPopupColumn / OverlayListPopup 又依赖 Scaffold + androidx.navigation。
-    // 官方组件把这一整套都封装好了，排版与尺寸都按 HyperOS 规范。
-    // 参考用法：OppoPods 的 SettingsPage（同样 miuix 0.9.2）。
-    implementation("top.yukonga.miuix.kmp:miuix-preference-android:0.9.4")
 
-    // 3.2.13: androidx.navigation —— 只为拿到 Miuix 下拉所需的那个接口。
-    //
-    // `LocalWindowInfo.current` 由 androidx.navigation 提供，它要求宿主 Activity
-    // 实现 `NavigationEventDispatcherOwner`；`ComponentActivity` **只有在
-    // navigation 在 classpath 里时**才会实现该接口。没有它，Miuix 任何下拉
-    // / 弹层一打开就崩：
-    //   IllegalStateException: No NavigationEventDispatcher was provided
-    //   via LocalNavigationEventDispatcherOwner
-    //
-    // ⚠️ 我们**不使用** NavHost/NavController、不改任何页面架构，
-    // 纯粹是让 Miuix 的弹层能开。参考项目同样引了它
-    // （HyperEars 用 navigation-compose 2.10.0，OppoPods 用 navigation3-runtime）。
-    //
-    // 只引 runtime（不含 compose 导航 UI），体积增量最小。
-    implementation("androidx.navigation:navigation-runtime:2.10.0")
-    // navigationevent 是 navigation-runtime 的**传递**依赖（runtime scope），
-    // 编译期不可见，而 MainActivity 要实现它声明的接口 → 必须显式引入。
-    implementation("androidx.navigationevent:navigationevent-android:1.1.1")
-    // LocalNavigationEventDispatcherOwner / provides(...) 在 compose 变体里。
-    // 我们用它做**显式注入**（绕开 View 树查找），所以必须显式引入。
-    implementation("androidx.navigationevent:navigationevent-compose-android:1.1.1")
 }
-
-// 3.2.13: 删除 postEdf（EDF 作用域注入 + 重签）整段。
-//
-// 查证结论：这个任务**从未被执行过**，而且执行了也没意义。
-//   - 它注册于 768d9db，但同一次提交里 `tasks.configureEach` 只留了空壳
-//     （`if (name == "assembleRelease") { }`），没有任何 dependsOn/ finalizedBy，
-//     所以 postEdf 一直是「注册了但没人调用」的死代码。
-//   - 它唯一比 packaging 多做的事是注入 `ascope.list`，而该文件
-//     `git log --all` 查不到任何记录 —— 从未存在过，post_edf.py 会直接 skip。
-//   - `scope.list` 早由 packaging.resources.merges = "META-INF/xposed/*"
-//     自动合入 APK（已下载 ci-209 产物核实：META-INF/xposed/ 下
-//     java_init.list / module.prop / scope.list 三者俱全）。
-//
-// 即：功能由 packaging 完整覆盖，postEdf 纯属冗余。留着它有两个害处：
-// 一是让后来人误以为「作用域靠它注入」，二是 build-tools 探测失败会让
-// 构建莫名中断。ponytail 原则：删掉比留着当陷阱好。
-//
-// tools/post_edf.py 同步删除。
 
 kotlin {
     compilerOptions {
